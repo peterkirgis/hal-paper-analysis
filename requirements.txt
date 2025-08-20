@@ -1,0 +1,21 @@
+# Core dependencies
+tqdm
+python-dotenv
+
+# HuggingFace integration
+huggingface-hub
+
+# Data processing
+ijson
+
+# Cryptography for decryption
+cryptography
+
+# Docent for transcript management
+docent
+
+# Pydantic for data models
+pydantic
+
+# Optional numpy support
+numpy

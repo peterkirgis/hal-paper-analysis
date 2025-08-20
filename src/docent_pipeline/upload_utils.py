@@ -1,0 +1,224 @@
+
+from typing import Dict, Any, Optional, Set
+import os
+
+from docent import Docent
+from docent.data_models import AgentRun, Transcript
+
+DOCENT_API_KEY = os.getenv("DOCENT_API_KEY")
+
+def create_docent_client(api_key: str = None) -> Docent:
+    """Create a Docent client."""
+    if api_key is None:
+        api_key = DOCENT_API_KEY
+    return Docent(api_key=api_key)
+
+def create_collection(client: Docent, name: str, description: str) -> str:
+    """Create a new collection and return its ID."""
+    return client.create_collection(name=name, description=description)
+    
+def upload_transcripts(
+    client: Docent,
+    docent_results: Dict[str, Any], 
+    collection_id: str, 
+    batch_by_model: bool = True
+) -> Dict[str, Any]:
+    """
+    Upload all transcripts from docent_results to a collection.
+    
+    Args:
+        client: Docent client instance
+        docent_results: Dictionary containing converted transcript data
+        collection_id: The collection ID to upload to
+        batch_by_model: If True, upload runs one model at a time
+    
+    Returns:
+        Dictionary with upload statistics
+    """
+    upload_stats = {
+        'total_runs': 0,
+        'successful_uploads': 0,
+        'failed_uploads': 0,
+        'skipped_runs': 0,
+        'failed_runs': []
+    }
+    
+    print("🚀 Processing docent_results for upload...")
+    
+    if batch_by_model:
+        return _upload_batched_by_model(client, docent_results, collection_id, upload_stats)
+    else:
+        return _upload_all_at_once(client, docent_results, collection_id, upload_stats)
+    
+def _upload_batched_by_model(
+    client: Docent,
+    docent_results: Dict[str, Any], 
+    collection_id: str, 
+    upload_stats: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Upload runs batched by model."""
+    # Group agent runs by model
+    model_groups = {}
+    
+    for zip_name, tasks in docent_results.items():
+        # Skip entries with errors
+        if "error" in tasks:
+            print(f"⚠️  Skipping {zip_name}: contains error")
+            upload_stats['skipped_runs'] += 1
+            continue
+            
+        for task_id, agent_run_data in tasks.items():
+            model = agent_run_data.get('model', 'unknown')
+            if model not in model_groups:
+                model_groups[model] = []
+            model_groups[model].append((zip_name, task_id, agent_run_data))
+    
+    print(f"📊 Found {len(model_groups)} models:")
+    for model, runs in model_groups.items():
+        print(f"   {model}: {len(runs)} runs")
+    
+    # Process each model group separately
+    for model, runs in model_groups.items():
+        print(f"\n🔄 Processing model: {model} ({len(runs)} runs)")
+        agent_runs = []
+        
+        for zip_name, task_id, agent_run_data in runs:
+            upload_stats['total_runs'] += 1
+            
+            try:
+                agent_run = _create_agent_run(zip_name, task_id, agent_run_data)
+                agent_runs.append(agent_run)
+                    
+            except Exception as e:
+                print(f"❌ Failed to create AgentRun for task {task_id[:12]}...: {e}")
+                upload_stats['failed_uploads'] += 1
+                upload_stats['failed_runs'].append({
+                    'task_id': task_id,
+                    'zip_name': zip_name,
+                    'error': str(e)
+                })
+                continue
+        
+        # Upload this model's runs
+        if agent_runs:
+            try:
+                print(f"   🔄 Uploading {len(agent_runs)} runs for {model}...")
+                client.add_agent_runs(collection_id, agent_runs)
+                upload_stats['successful_uploads'] += len(agent_runs)
+                print(f"   ✅ Successfully uploaded {len(agent_runs)} runs for {model}!")
+                
+            except Exception as e:
+                print(f"   ❌ Failed to upload runs for {model}: {e}")
+                upload_stats['failed_uploads'] += len(agent_runs)
+                for agent_run in agent_runs:
+                    upload_stats['failed_runs'].append({
+                        'agent_run_id': agent_run.id,
+                        'model': model,
+                        'error': str(e)
+                    })
+    
+    _print_upload_stats(upload_stats)
+    return upload_stats
+    
+def _upload_all_at_once(
+    client: Docent,
+    docent_results: Dict[str, Any], 
+    collection_id: str, 
+    upload_stats: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Upload all runs at once."""
+    agent_runs = []
+    
+    for zip_name, tasks in docent_results.items():
+        # Skip entries with errors
+        if "error" in tasks:
+            print(f"⚠️  Skipping {zip_name}: contains error")
+            upload_stats['skipped_runs'] += 1
+            continue
+            
+        print(f"📁 Processing {zip_name}...")
+        
+        for task_id, agent_run_data in tasks.items():
+            upload_stats['total_runs'] += 1
+            
+            try:
+                agent_run = _create_agent_run(zip_name, task_id, agent_run_data)
+                agent_runs.append(agent_run)
+                
+                if len(agent_runs) % 10 == 0:
+                    print(f"   ✅ Prepared {len(agent_runs)} agent runs...")
+                    
+            except Exception as e:
+                print(f"❌ Failed to create AgentRun for task {task_id[:12]}...: {e}")
+                upload_stats['failed_uploads'] += 1
+                upload_stats['failed_runs'].append({
+                    'task_id': task_id,
+                    'zip_name': zip_name,
+                    'error': str(e)
+                })
+                continue
+    
+    print(f"📊 Prepared {len(agent_runs)} agent runs for upload")
+    
+    # Upload all agent runs to the collection
+    if agent_runs:
+        try:
+            print(f"🔄 Uploading {len(agent_runs)} agent runs to collection {collection_id}...")
+            client.add_agent_runs(collection_id, agent_runs)
+            upload_stats['successful_uploads'] = len(agent_runs)
+            print(f"✅ Successfully uploaded {len(agent_runs)} agent runs!")
+            
+        except Exception as e:
+            print(f"❌ Failed to upload agent runs: {e}")
+            upload_stats['failed_uploads'] += len(agent_runs)
+            for agent_run in agent_runs:
+                upload_stats['failed_runs'].append({
+                    'agent_run_id': agent_run.id,
+                    'error': str(e)
+                })
+    
+    _print_upload_stats(upload_stats)
+    return upload_stats
+    
+def _create_agent_run(zip_name: str, task_id: str, agent_run_data: Dict[str, Any]) -> AgentRun:
+    """Create an AgentRun from agent run data."""
+    # Extract metadata
+    metadata = {
+        "benchmark_id": "assistantbench",
+        "task_id": task_id,
+        "model": agent_run_data.get('model', 'unknown'),
+        "run_id": zip_name,
+        "weave_task_id": agent_run_data.get('weave_task_id'),
+        "eval": agent_run_data.get('eval'),
+        "original_message_count": agent_run_data['original_message_count'],
+        "docent_message_count": agent_run_data['docent_message_count'],
+        "failed_message_count": agent_run_data['failed_message_count']
+    }
+    
+    # Create transcript from docent messages
+    transcript = Transcript(
+        messages=agent_run_data['docent_messages'],
+        metadata=metadata
+    )
+    
+    # Create transcripts dict (AgentRun expects plural)
+    transcripts = {
+        "default": transcript
+    }
+    
+    # Create AgentRun
+    return AgentRun(
+        transcripts=transcripts,
+        metadata=metadata
+    )
+
+def _print_upload_stats(upload_stats: Dict[str, Any]):
+    """Print upload statistics."""
+    print(f"\n📈 Upload Statistics:")
+    print(f"   Total runs processed: {upload_stats['total_runs']}")
+    print(f"   Successfully uploaded: {upload_stats['successful_uploads']}")
+    print(f"   Failed uploads: {upload_stats['failed_uploads']}")
+    print(f"   Skipped runs: {upload_stats['skipped_runs']}")
+    
+    if upload_stats['failed_runs']:
+        print(f"   Failed runs: {len(upload_stats['failed_runs'])}")
