@@ -1,8 +1,5 @@
 import os
 
-# Default HF token from environment
-HF_TOKEN = os.environ.get("HF_TOKEN", "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")
-
 # File filtering patterns
 BENCHMARK_AGENT_PREFIX = "assistantbench_assistantbench_browser_agent"
 
@@ -18,9 +15,6 @@ EXCLUDED_FILES = {
 
 # Processing limits
 DEFAULT_TASK_LIMIT = 1  # None means process all tasks
-
-# Docent configuration
-DOCENT_API_KEY = "dk_JiGrL0p0WOspou5-AtqR553tXTsyFOjwqKnhvx__7Nk"
 
 # Output settings
 DEFAULT_OUTPUT_FILE = "assistantbench_browser_agent_runs.json"
