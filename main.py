@@ -45,7 +45,8 @@ def process_all_files(
     files: Optional[list] = None,
     task_limit: Optional[int] = DEFAULT_TASK_LIMIT,
     require_model: Optional[str] = None,
-    include_eval: bool = True
+    include_eval: bool = True,
+    include_eval_results: bool = True
 ) -> Dict[str, Any]:
     """
     Process all ZIP files and extract agent runs.
@@ -56,6 +57,7 @@ def process_all_files(
         task_limit: Maximum tasks per file to process (None for all)
         require_model: Only process runs with this model
         include_eval: Include evaluation data in results
+        include_eval_results: Include raw evaluation results (scores, answers) mapped by task index
         
     Returns:
         Dictionary mapping zip_name -> {task_id -> agent_run}
@@ -79,6 +81,7 @@ def process_all_files(
                 member_name=None,
                 require_model=require_model,
                 include_eval=include_eval,
+                include_eval_results=include_eval_results,
                 limit=task_limit,
                 aggregate_all=True,
             ):
@@ -234,7 +237,8 @@ def run_full_pipeline(
         hf_client_config,
         task_limit=task_limit,
         require_model=require_model,
-        include_eval=include_eval
+        include_eval=include_eval,
+        include_eval_results=True  # Enable raw eval results extraction
     )
     
     # Step 2: Save intermediate results

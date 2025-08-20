@@ -295,7 +295,40 @@ def normalize_assistant_output(item: Dict[str, Any]):
     }
 
 
-def build_agent_run_from_bucket(tid: str, bucket, model, eval_blob=None):
+def extract_eval_results_for_task(tid: str, task_id_list: List[str], raw_eval_results: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Extract evaluation results for a specific task based on its index in the task list.
+    
+    Args:
+        tid: The task ID to find eval results for
+        task_id_list: Ordered list of task IDs as they appear in the eval results
+        raw_eval_results: Dictionary containing raw evaluation results with list values
+        
+    Returns:
+        Dictionary with eval results for this task, or empty dict if not found
+    """
+    if not task_id_list or not raw_eval_results:
+        return {}
+        
+    try:
+        task_index = task_id_list.index(tid)
+    except ValueError:
+        # Task ID not found in list
+        return {}
+    
+    task_eval_data = {}
+    
+    # Extract data from any list-type fields in raw_eval_results
+    for key, value in raw_eval_results.items():
+        if isinstance(value, list) and task_index < len(value):
+            task_eval_data[key] = value[task_index]
+        elif not isinstance(value, list):
+            # Non-list data is global/metadata, include it
+            task_eval_data[f"global_{key}"] = value
+    
+    return task_eval_data
+
+def build_agent_run_from_bucket(tid: str, bucket, model, eval_blob=None, task_eval_results=None):
     """Build an agent run from a bucket of messages."""
     # Include messages with empty content (important for system/user messages)
     msgs_sorted = sorted([m for m in bucket if m.get("role")], 
@@ -320,6 +353,12 @@ def build_agent_run_from_bucket(tid: str, bucket, model, eval_blob=None):
             "task": eval_blob.get("task", eval_blob.get("info", {})) or {},
         }
     
+    # Add task-specific eval results if available
+    if task_eval_results:
+        if "eval" not in agent_run:
+            agent_run["eval"] = {}
+        agent_run["eval"]["raw_results"] = task_eval_results
+    
     agent_run["messages"] = dedupe_messages(agent_run["messages"])
     return agent_run
 
@@ -329,6 +368,7 @@ def stream_agent_runs_by_task(
     member_name: Optional[str] = None,
     require_model: Optional[str] = None,
     include_eval: bool = False,
+    include_eval_results: bool = True,
     limit: Optional[int] = None,
     aggregate_all: bool = True,
     password: str = "hal1234"
@@ -342,6 +382,7 @@ def stream_agent_runs_by_task(
         member_name: Specific member to extract (if None, uses first non-directory)
         require_model: Only process items with this model
         include_eval: Include evaluation data in results
+        include_eval_results: Include raw evaluation results (scores, answers) mapped by task index
         limit: Maximum number of tasks to process
         aggregate_all: Whether to aggregate all messages per task
         password: Decryption password
@@ -377,7 +418,24 @@ def stream_agent_runs_by_task(
     tasks_bucket = {}
     model_by_tid = {}
     eval_by_tid = {}
+    raw_eval_results = {}
+    task_id_list = []  # Keep track of task order for index mapping
     produced = 0
+    
+    # First pass: Extract raw_eval_results if requested
+    if include_eval_results:
+        try:
+            with open(plaintext_path, "r") as f:
+                data = json.load(f)
+                raw_eval_results = data.get('raw_eval_results', {})
+                # Get ordered list of task IDs from results section
+                results = data.get('results', {})
+                if 'successful_tasks' in results and 'failed_tasks' in results:
+                    # Combine successful and failed tasks in the order they appear
+                    task_id_list = results['successful_tasks'] + results['failed_tasks']
+        except Exception as e:
+            print(f"Warning: Could not extract raw_eval_results: {e}")
+            raw_eval_results = {}
     
     try:
         with open(plaintext_path, "rb") as f:
@@ -420,11 +478,17 @@ def stream_agent_runs_by_task(
 
         # Emit once per task
         for tid, bucket in tasks_bucket.items():
+            # Extract task-specific eval results if available
+            task_eval_results = None
+            if include_eval_results and raw_eval_results:
+                task_eval_results = extract_eval_results_for_task(tid, task_id_list, raw_eval_results)
+            
             run = build_agent_run_from_bucket(
                 tid=tid,
                 bucket=bucket,
                 model=model_by_tid.get(tid),
                 eval_blob=eval_by_tid.get(tid) if include_eval else None,
+                task_eval_results=task_eval_results,
             )
             yield tid, run
             produced += 1

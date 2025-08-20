@@ -1,11 +1,27 @@
 
-from typing import Dict, Any, Optional, Set
+from typing import Dict, Any, Optional, Set, List
 import os
+import time
+from requests.exceptions import ConnectionError, Timeout, HTTPError
 
 from docent import Docent
 from docent.data_models import AgentRun, Transcript
 
 DOCENT_API_KEY = os.getenv("DOCENT_API_KEY")
+
+def _retry_with_backoff(func, max_retries=3, base_delay=2, *args, **kwargs):
+    """Retry a function with exponential backoff."""
+    for attempt in range(max_retries):
+        try:
+            return func(*args, **kwargs)
+        except (ConnectionError, Timeout, HTTPError) as e:
+            if attempt == max_retries - 1:
+                raise  # Re-raise on final attempt
+            
+            delay = base_delay * (2 ** attempt)  # Exponential backoff
+            print(f"⚠️  Connection failed (attempt {attempt + 1}/{max_retries}): {e}")
+            print(f"   Retrying in {delay}s...")
+            time.sleep(delay)
 
 def create_docent_client(api_key: str = None) -> Docent:
     """Create a Docent client."""
@@ -14,8 +30,9 @@ def create_docent_client(api_key: str = None) -> Docent:
     return Docent(api_key=api_key)
 
 def create_collection(client: Docent, name: str, description: str) -> str:
-    """Create a new collection and return its ID."""
-    return client.create_collection(name=name, description=description)
+    """Create a new collection and return its ID with retry logic."""
+    print(f"🔧 Creating collection: {name}")
+    return _retry_with_backoff(client.create_collection, 3, 2, name=name, description=description)
     
 def upload_transcripts(
     client: Docent,
@@ -102,10 +119,23 @@ def _upload_batched_by_model(
         # Upload this model's runs
         if agent_runs:
             try:
-                print(f"   🔄 Uploading {len(agent_runs)} runs for {model}...")
-                client.add_agent_runs(collection_id, agent_runs)
-                upload_stats['successful_uploads'] += len(agent_runs)
-                print(f"   ✅ Successfully uploaded {len(agent_runs)} runs for {model}!")
+                # Upload in smaller batches to avoid connection issues
+                batch_size = min(50, len(agent_runs))  # Limit batch size
+                total_uploaded = 0
+                
+                for i in range(0, len(agent_runs), batch_size):
+                    batch = agent_runs[i:i + batch_size]
+                    print(f"   🔄 Uploading batch {i//batch_size + 1} ({len(batch)} runs) for {model}...")
+                    
+                    _retry_with_backoff(client.add_agent_runs, 3, 2, collection_id, batch)
+                    total_uploaded += len(batch)
+                    
+                    # Small delay between batches to avoid overwhelming the server
+                    if i + batch_size < len(agent_runs):
+                        time.sleep(1)
+                
+                upload_stats['successful_uploads'] += total_uploaded
+                print(f"   ✅ Successfully uploaded {total_uploaded} runs for {model}!")
                 
             except Exception as e:
                 print(f"   ❌ Failed to upload runs for {model}: {e}")
@@ -163,10 +193,23 @@ def _upload_all_at_once(
     # Upload all agent runs to the collection
     if agent_runs:
         try:
-            print(f"🔄 Uploading {len(agent_runs)} agent runs to collection {collection_id}...")
-            client.add_agent_runs(collection_id, agent_runs)
-            upload_stats['successful_uploads'] = len(agent_runs)
-            print(f"✅ Successfully uploaded {len(agent_runs)} agent runs!")
+            # Upload in smaller batches to avoid connection issues
+            batch_size = min(50, len(agent_runs))  # Limit batch size
+            total_uploaded = 0
+            
+            for i in range(0, len(agent_runs), batch_size):
+                batch = agent_runs[i:i + batch_size]
+                print(f"🔄 Uploading batch {i//batch_size + 1} ({len(batch)} runs)...")
+                
+                _retry_with_backoff(client.add_agent_runs, 3, 2, collection_id, batch)
+                total_uploaded += len(batch)
+                
+                # Small delay between batches to avoid overwhelming the server
+                if i + batch_size < len(agent_runs):
+                    time.sleep(1)
+            
+            upload_stats['successful_uploads'] = total_uploaded
+            print(f"✅ Successfully uploaded {total_uploaded} agent runs!")
             
         except Exception as e:
             print(f"❌ Failed to upload agent runs: {e}")
@@ -194,6 +237,19 @@ def _create_agent_run(zip_name: str, task_id: str, agent_run_data: Dict[str, Any
         "docent_message_count": agent_run_data['docent_message_count'],
         "failed_message_count": agent_run_data['failed_message_count']
     }
+    
+    # Add raw eval results to metadata if available
+    eval_data = agent_run_data.get('eval', {})
+    if eval_data and 'raw_results' in eval_data:
+        raw_results = eval_data['raw_results']
+        # Flatten raw results into metadata with clear prefixes
+        for key, value in raw_results.items():
+            if not key.startswith('global_'):
+                # These are task-specific results like scores, answers
+                metadata[f"eval_{key}"] = value
+            else:
+                # These are global/benchmark metadata 
+                metadata[key] = value
     
     # Create transcript from docent messages
     transcript = Transcript(
