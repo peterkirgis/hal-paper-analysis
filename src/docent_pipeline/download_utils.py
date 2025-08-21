@@ -206,23 +206,95 @@ def _msg_fingerprint(m: Dict[str, Any]) -> tuple:
     return (role, content, tool_calls)
 
 
+def _msg_content_fingerprint(m: Dict[str, Any]) -> tuple:
+    """Fingerprint of message content only (ignoring role)."""
+    content = _canon_text(m.get("content") or "")
+    tool_calls = tuple(sorted(_tc_canon(tc) for tc in (m.get("tool_calls") or []) if isinstance(tc, dict)))
+    return (content, tool_calls)
+
+
+def extract_eval_results_for_task(task_id: str, task_id_list: List[str], raw_eval_results: Dict[str, Any]) -> Dict[str, Any]:
+    """Extract evaluation metadata for a specific task."""
+    result = {}
+    
+    # Extract binary success flag from results section
+    if 'results' in raw_eval_results:
+        results = raw_eval_results['results']
+        successful_tasks = results.get('successful_tasks', [])
+        
+        # Convert task_id to string for comparison
+        task_id_str = str(task_id)
+        result['is_successful'] = task_id_str in [str(t) for t in successful_tasks]
+        
+        # Also include the raw successful/failed task lists for reference
+        result['successful_tasks'] = successful_tasks
+        result['failed_tasks'] = results.get('failed_tasks', [])
+    
+    # Extract successful subtasks from raw_eval_results.details section (scicode format)
+    # The details dict is nested inside raw_eval_results: raw_eval_results['details'][task_id]
+    if 'details' in raw_eval_results:
+        details = raw_eval_results['details']
+        task_id_str = str(task_id)
+        if task_id_str in details:
+            # The value is directly the list of successful subtasks
+            successful_subtasks = details[task_id_str]
+            if isinstance(successful_subtasks, list):
+                # Include even empty lists (they indicate the task was attempted)
+                result['successful_subtasks'] = successful_subtasks
+    
+    # For assistantbench format, also look for indexed results (if raw_eval_results is a list)
+    try:
+        if isinstance(raw_eval_results, list):
+            task_index = task_id_list.index(task_id) if task_id_list and task_id in task_id_list else None
+            if task_index is not None and task_index < len(raw_eval_results):
+                indexed_result = raw_eval_results[task_index]
+                if indexed_result:
+                    result.update(indexed_result)
+    except (ValueError, IndexError, TypeError):
+        # Task not found in index or other indexing issue
+        pass
+    
+    return result if result else None
+
+
 def dedupe_messages(messages, mode: str = "consecutive"):
     """Drop duplicate messages."""
-    out = []
-    last_fp = None
-    seen = set()
-    for m in messages:
-        fp = _msg_fingerprint(m)
-        if mode == "consecutive":
+    if mode == "consecutive":
+        out = []
+        last_fp = None
+        for m in messages:
+            fp = _msg_fingerprint(m)
             if fp == last_fp:
                 continue
             last_fp = fp
-        else:  # global
+            out.append(m)
+        return out
+    
+    elif mode == "global":
+        out = []
+        seen = set()
+        for m in messages:
+            fp = _msg_fingerprint(m)
             if fp in seen:
                 continue
             seen.add(fp)
-        out.append(m)
-    return out
+            out.append(m)
+        return out
+    
+    elif mode == "cross_role":
+        # Deduplicate based on content only, ignoring role
+        out = []
+        seen_content = set()
+        for m in messages:
+            content_fp = _msg_content_fingerprint(m)
+            if content_fp in seen_content:
+                continue
+            seen_content.add(content_fp)
+            out.append(m)
+        return out
+    
+    else:
+        raise ValueError(f"Unknown deduplication mode: {mode}")
 
 
 def _collapse_content_to_text(content) -> str:
@@ -294,40 +366,6 @@ def normalize_assistant_output(item: Dict[str, Any]):
         "ts": item.get("ended_at") or item.get("created_timestamp"),
     }
 
-
-def extract_eval_results_for_task(tid: str, task_id_list: List[str], raw_eval_results: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Extract evaluation results for a specific task based on its index in the task list.
-    
-    Args:
-        tid: The task ID to find eval results for
-        task_id_list: Ordered list of task IDs as they appear in the eval results
-        raw_eval_results: Dictionary containing raw evaluation results with list values
-        
-    Returns:
-        Dictionary with eval results for this task, or empty dict if not found
-    """
-    if not task_id_list or not raw_eval_results:
-        return {}
-        
-    try:
-        task_index = task_id_list.index(tid)
-    except ValueError:
-        # Task ID not found in list
-        return {}
-    
-    task_eval_data = {}
-    
-    # Extract data from any list-type fields in raw_eval_results
-    for key, value in raw_eval_results.items():
-        if isinstance(value, list) and task_index < len(value):
-            task_eval_data[key] = value[task_index]
-        elif not isinstance(value, list):
-            # Non-list data is global/metadata, include it
-            task_eval_data[f"global_{key}"] = value
-    
-    return task_eval_data
-
 def build_agent_run_from_bucket(tid: str, bucket, model, eval_blob=None, task_eval_results=None):
     """Build an agent run from a bucket of messages."""
     # Include messages with empty content (important for system/user messages)
@@ -359,8 +397,44 @@ def build_agent_run_from_bucket(tid: str, bucket, model, eval_blob=None, task_ev
             agent_run["eval"] = {}
         agent_run["eval"]["raw_results"] = task_eval_results
     
-    agent_run["messages"] = dedupe_messages(agent_run["messages"])
+    agent_run["messages"] = dedupe_messages(agent_run["messages"], mode="cross_role")
     return agent_run
+
+def _extract_model_from_filename(zip_name: str) -> Optional[str]:
+    """Extract model name from ZIP filename."""
+    # Remove the path and extension
+    base_name = zip_name.split('/')[-1].replace('.zip', '').replace('_UPLOAD', '')
+    
+    # Parse patterns like: benchmark_agent_model_timestamp
+    parts = base_name.split('_')
+    
+    # Look for known model patterns in the filename
+    for part in parts:
+        part_lower = part.lower()
+        # Map common model names
+        if 'gpt4o' in part_lower or 'gpt-4o' in part_lower:
+            return 'gpt-4o'
+        elif 'gpt4' in part_lower:
+            return 'gpt-4'
+        elif 'deepseekr1' in part_lower:
+            return 'deepseek-r1'
+        elif 'deepseekv3' in part_lower:
+            return 'deepseek-v3'
+        elif 'deepseekai' in part_lower and 'deepseekr1' in part_lower:
+            return 'deepseek-r1'
+        elif 'deepseekai' in part_lower and 'deepseekv3' in part_lower:
+            return 'deepseek-v3'
+        elif 'claude' in part_lower:
+            return 'claude-3.5-sonnet'
+        elif 'gemini' in part_lower:
+            return 'gemini-2.0-flash'
+        elif 'o1' in part_lower:
+            return 'o1'
+        elif 'o3' in part_lower:
+            return 'o3'
+    
+    return None
+
 
 def stream_agent_runs_by_task(
     client_config: Dict[str, Any],
@@ -433,6 +507,8 @@ def stream_agent_runs_by_task(
                 if 'successful_tasks' in results and 'failed_tasks' in results:
                     # Combine successful and failed tasks in the order they appear
                     task_id_list = results['successful_tasks'] + results['failed_tasks']
+                    # Include the results section in raw_eval_results for easy access
+                    raw_eval_results['results'] = results
         except Exception as e:
             print(f"Warning: Could not extract raw_eval_results: {e}")
             raw_eval_results = {}
@@ -444,10 +520,24 @@ def stream_agent_runs_by_task(
                 if not tid:
                     continue
 
-                # Model discovery
+                # Model discovery - prefer non-gpt-4o models when conflicts arise
                 mdl = (item.get("inputs", {}) or {}).get("model") or (item.get("output", {}) or {}).get("model")
                 if mdl:
-                    model_by_tid[tid] = mdl
+                    existing_model = model_by_tid.get(tid)
+                    # If we already have a model for this task, prefer the non-gpt-4o one
+                    if existing_model:
+                        # Keep the existing model if new model is gpt-4o but existing isn't
+                        if mdl.lower().startswith('gpt-4o') and not existing_model.lower().startswith('gpt-4o'):
+                            pass  # Keep existing model
+                        # Replace existing gpt-4o with non-gpt-4o model
+                        elif not mdl.lower().startswith('gpt-4o') and existing_model.lower().startswith('gpt-4o'):
+                            model_by_tid[tid] = mdl
+                        # If both are non-gpt-4o, prefer the longer/more specific one
+                        elif not mdl.lower().startswith('gpt-4o') and not existing_model.lower().startswith('gpt-4o'):
+                            if len(mdl) > len(existing_model):
+                                model_by_tid[tid] = mdl
+                    else:
+                        model_by_tid[tid] = mdl
 
                 # Eval blob
                 if ("reward" in item) or ("task" in item) or ("info" in item):
@@ -476,6 +566,9 @@ def stream_agent_runs_by_task(
                 if ao:
                     tasks_bucket[tid].append(ao)
 
+        # Extract model from filename as fallback
+        filename_model = _extract_model_from_filename(zip_name)
+        
         # Emit once per task
         for tid, bucket in tasks_bucket.items():
             # Extract task-specific eval results if available
@@ -483,10 +576,13 @@ def stream_agent_runs_by_task(
             if include_eval_results and raw_eval_results:
                 task_eval_results = extract_eval_results_for_task(tid, task_id_list, raw_eval_results)
             
+            # Use model from task data or fallback to filename-based extraction
+            task_model = model_by_tid.get(tid) or filename_model
+            
             run = build_agent_run_from_bucket(
                 tid=tid,
                 bucket=bucket,
-                model=model_by_tid.get(tid),
+                model=task_model,
                 eval_blob=eval_by_tid.get(tid) if include_eval else None,
                 task_eval_results=task_eval_results,
             )
