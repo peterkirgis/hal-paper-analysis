@@ -1,21 +1,40 @@
-# Core dependencies
+# =============================================================================
+# HAL Paper Analysis - Requirements
+# =============================================================================
+
+# Core dependencies (shared)
 tqdm
 python-dotenv
+
+# =============================================================================
+# Qualitative Analysis Dependencies
+# =============================================================================
 
 # HuggingFace integration
 huggingface-hub
 
-# Data processing
+# Data processing and decryption
 ijson
-
-# Cryptography for decryption
 cryptography
 
 # Docent for transcript management
-docent
+docent-python
 
-# Pydantic for data models
-pydantic
+# Network requests (for upload_utils)
+requests
 
-# Optional numpy support
+# =============================================================================
+# Quantitative Analysis Dependencies
+# =============================================================================
+
+# Data analysis and processing
+pandas
 numpy
+scikit-learn
+
+# Visualization
+matplotlib
+seaborn
+
+# Jupyter notebooks (if using notebooks)
+jupyter

@@ -1,0 +1,3 @@
+[submodule "quantitative/hal-frontend"]
+	path = quantitative/hal-frontend
+	url = https://github.com/fsndzomga/hal-frontend.git

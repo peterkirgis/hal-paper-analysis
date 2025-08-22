@@ -27,9 +27,9 @@ EXCLUDED_FILES = {
 DEFAULT_TASK_LIMIT = 1 # None means process all tasks
 
 # Output settings
-DEFAULT_OUTPUT_FILE = "taubench_fewshot_runs_test.json"
-# DEFAULT_OUTPUT_FILE = "scicode_tool_calling_runs_test.json"
-# DEFAULT_OUTPUT_FILE = "corebench_coreagent_runs_test.json"
+DEFAULT_OUTPUT_FILE = "outputs/taubench_fewshot_runs_test.json"
+# DEFAULT_OUTPUT_FILE = "outputs/scicode_tool_calling_runs_test.json"
+# DEFAULT_OUTPUT_FILE = "outputs/corebench_coreagent_runs_test.json"
 
 # Collection name
 # COLLECTION_NAME = "corebench_1_task"

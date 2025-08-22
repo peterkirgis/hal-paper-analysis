@@ -28,10 +28,22 @@ def normalize_message_for_docent(msg: Dict[str, Any]) -> Dict[str, Any]:
                 fixed_tc['function'] = 'unknown_function'
             
             # Arguments - should be a dict at the top level
+            arguments = None
             if 'arguments' in tool_call:
-                fixed_tc['arguments'] = tool_call['arguments']
+                arguments = tool_call['arguments']
             elif isinstance(tool_call.get('function'), dict) and 'arguments' in tool_call['function']:
-                fixed_tc['arguments'] = tool_call['function']['arguments']
+                arguments = tool_call['function']['arguments']
+            
+            # Parse arguments if it's a JSON string
+            if isinstance(arguments, str):
+                try:
+                    import json
+                    fixed_tc['arguments'] = json.loads(arguments)
+                except (json.JSONDecodeError, TypeError):
+                    # If parsing fails, wrap in a dict or use empty dict
+                    fixed_tc['arguments'] = {'raw_value': arguments} if arguments else {}
+            elif isinstance(arguments, dict):
+                fixed_tc['arguments'] = arguments
             else:
                 fixed_tc['arguments'] = {}
             
