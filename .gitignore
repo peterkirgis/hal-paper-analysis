@@ -1,5 +1,5 @@
 .env
-.json
+/*.json
 __pycache__/
 .DS_Store
 testing/

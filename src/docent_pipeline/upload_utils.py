@@ -225,14 +225,16 @@ def _upload_all_at_once(
     
 def _create_agent_run(zip_name: str, task_id: str, agent_run_data: Dict[str, Any]) -> AgentRun:
     """Create an AgentRun from agent run data."""
+
+    # Get benchmark label by splitting at the first underscore
+    benchmark_label = zip_name.split('_')[0]
     # Extract metadata
     metadata = {
-        "benchmark_id": "assistantbench",
+        "benchmark_id": benchmark_label,
         "task_id": task_id,
         "model": agent_run_data.get('model', 'unknown'),
         "run_id": zip_name,
         "weave_task_id": agent_run_data.get('weave_task_id'),
-        "eval": agent_run_data.get('eval'),
         "original_message_count": agent_run_data['original_message_count'],
         "docent_message_count": agent_run_data['docent_message_count'],
         "failed_message_count": agent_run_data['failed_message_count']
