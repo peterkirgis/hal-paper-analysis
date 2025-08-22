@@ -114,7 +114,7 @@ def open_hf_file(client_config: Dict[str, Any], file_path: str, mode: str = "rb"
     return client_config["fs"].open(full_path, mode)
 
 
-def extract_contextual_messages_from_item(item: Dict[str, Any]) -> List[Dict[str, Any]]:
+def extract_contextual_messages_from_item(item: Dict[str, Any], primary_model: Optional[str] = None) -> List[Dict[str, Any]]:
     """Extract user, system, and assistant messages that are contextual to this specific log item"""
     
     def _collapse_content_to_text(content) -> str:
@@ -130,6 +130,7 @@ def extract_contextual_messages_from_item(item: Dict[str, Any]) -> List[Dict[str
     
     messages = []
     ts = item.get("started_at") or item.get("created_timestamp")
+    current_model = (item.get("inputs", {}) or {}).get("model")
     
     # Check inputs.messages for contextual user/system messages
     input_messages = item.get("inputs", {}).get("messages", [])
@@ -153,8 +154,15 @@ def extract_contextual_messages_from_item(item: Dict[str, Any]) -> List[Dict[str
         if isinstance(msg, dict) and msg.get("role") == "assistant":
             content = _collapse_content_to_text(msg.get("content"))
             if content:  # Only include assistant messages with content
+                # Determine if this should be treated as user input (role-playing scenario)
+                role = "assistant"
+                if (primary_model and current_model and 
+                    current_model.lower() != primary_model.lower() and
+                    current_model.lower().startswith('gpt-4o')):
+                    role = "user"
+                    
                 messages.append({
-                    "role": "assistant", 
+                    "role": role, 
                     "content": content,
                     "tool_calls": msg.get("tool_calls", []),
                     "ts": ts
@@ -349,7 +357,7 @@ def normalize_weave_log_item(item: Dict[str, Any]):
     }
 
 
-def normalize_assistant_output(item: Dict[str, Any]):
+def normalize_assistant_output(item: Dict[str, Any], primary_model: Optional[str] = None):
     """Pick up OpenAI-style assistant messages from the 'output' side."""
     out = item.get("output") or {}
     choices = out.get("choices") or []
@@ -359,14 +367,26 @@ def normalize_assistant_output(item: Dict[str, Any]):
     content = msg.get("content")
     if not content:
         return None
+    
+    # Determine the role based on whether this is from the primary model
+    current_model = (item.get("inputs", {}) or {}).get("model") or out.get("model")
+    role = "assistant"
+    
+    # If we have a primary model and this message is from a different model (like gpt-4o in taubench),
+    # treat it as user input (role-playing scenario)
+    if (primary_model and current_model and 
+        current_model.lower() != primary_model.lower() and
+        current_model.lower().startswith('gpt-4o')):
+        role = "user"
+    
     return {
-        "role": "assistant",
+        "role": role,
         "content": content if isinstance(content, str) else _collapse_content_to_text(content),
         "tool_calls": [],
         "ts": item.get("ended_at") or item.get("created_timestamp"),
     }
 
-def build_agent_run_from_bucket(tid: str, bucket, model, eval_blob=None, task_eval_results=None):
+def build_agent_run_from_bucket(tid: str, bucket, model, eval_blob=None, task_eval_results=None, config_metadata=None):
     """Build an agent run from a bucket of messages."""
     # Include messages with empty content (important for system/user messages)
     msgs_sorted = sorted([m for m in bucket if m.get("role")], 
@@ -396,6 +416,10 @@ def build_agent_run_from_bucket(tid: str, bucket, model, eval_blob=None, task_ev
         if "eval" not in agent_run:
             agent_run["eval"] = {}
         agent_run["eval"]["raw_results"] = task_eval_results
+    
+    # Add config metadata if available
+    if config_metadata:
+        agent_run["config_metadata"] = config_metadata
     
     agent_run["messages"] = dedupe_messages(agent_run["messages"], mode="cross_role")
     return agent_run
@@ -494,9 +518,10 @@ def stream_agent_runs_by_task(
     eval_by_tid = {}
     raw_eval_results = {}
     task_id_list = []  # Keep track of task order for index mapping
+    config_metadata = {}  # Store config metadata
     produced = 0
     
-    # First pass: Extract raw_eval_results if requested
+    # First pass: Extract raw_eval_results and config metadata if requested
     if include_eval_results:
         try:
             with open(plaintext_path, "r") as f:
@@ -509,8 +534,17 @@ def stream_agent_runs_by_task(
                     task_id_list = results['successful_tasks'] + results['failed_tasks']
                     # Include the results section in raw_eval_results for easy access
                     raw_eval_results['results'] = results
+                    
+                # Extract config metadata
+                config_data = data.get('config', {})
+                agent_args = config_data.get('agent_args', {})
+                
+                # Extract reasoning_effort if present
+                if 'reasoning_effort' in agent_args:
+                    config_metadata['reasoning_effort'] = agent_args['reasoning_effort']
+                    
         except Exception as e:
-            print(f"Warning: Could not extract raw_eval_results: {e}")
+            print(f"Warning: Could not extract raw_eval_results and config metadata: {e}")
             raw_eval_results = {}
     
     try:
@@ -552,8 +586,11 @@ def stream_agent_runs_by_task(
                 if tid not in tasks_bucket:
                     tasks_bucket[tid] = []
 
+                # Determine the primary model for this task (prefer non-gpt-4o models)
+                primary_model = model_by_tid.get(tid)
+                
                 # Extract ALL contextual messages from this item
-                contextual_messages = extract_contextual_messages_from_item(item)
+                contextual_messages = extract_contextual_messages_from_item(item, primary_model)
                 tasks_bucket[tid].extend(contextual_messages)
 
                 # Normalize individual messages from inputs.raw
@@ -562,7 +599,7 @@ def stream_agent_runs_by_task(
                     tasks_bucket[tid].append(nm)
 
                 # Assistant messages from outputs
-                ao = normalize_assistant_output(item)
+                ao = normalize_assistant_output(item, primary_model)
                 if ao:
                     tasks_bucket[tid].append(ao)
 
@@ -585,6 +622,7 @@ def stream_agent_runs_by_task(
                 model=task_model,
                 eval_blob=eval_by_tid.get(tid) if include_eval else None,
                 task_eval_results=task_eval_results,
+                config_metadata=config_metadata,
             )
             yield tid, run
             produced += 1

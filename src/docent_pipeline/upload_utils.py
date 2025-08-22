@@ -229,16 +229,32 @@ def _create_agent_run(zip_name: str, task_id: str, agent_run_data: Dict[str, Any
     # Get benchmark label by splitting at the first underscore
     benchmark_label = zip_name.split('_')[0]
     # Extract metadata
+    base_model = agent_run_data.get('model', 'unknown')
+    
+    # Get config metadata and check for reasoning_effort
+    config_metadata = agent_run_data.get('config_metadata', {})
+    reasoning_effort = config_metadata.get('reasoning_effort')
+    
+    # Append reasoning_effort to model name if present
+    if reasoning_effort:
+        model_name = f"{base_model}_{reasoning_effort}"
+    else:
+        model_name = base_model
+    
     metadata = {
         "benchmark_id": benchmark_label,
         "task_id": task_id,
-        "model": agent_run_data.get('model', 'unknown'),
+        "model": model_name,
         "run_id": zip_name,
         "weave_task_id": agent_run_data.get('weave_task_id'),
         "original_message_count": agent_run_data['original_message_count'],
         "docent_message_count": agent_run_data['docent_message_count'],
         "failed_message_count": agent_run_data['failed_message_count']
     }
+    
+    # Add config metadata if available
+    if config_metadata:
+        metadata.update(config_metadata)
     
     # Add raw eval results to metadata if available
     eval_data = agent_run_data.get('eval', {})

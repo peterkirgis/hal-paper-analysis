@@ -108,6 +108,7 @@ def convert_to_docent_messages(loaded_results: Dict[str, Any]) -> Tuple[Dict[str
                 'weave_task_id': agent_run.get('weave_task_id'),
                 'model': agent_run.get('model'),
                 'eval': agent_run.get('eval'),
+                'config_metadata': agent_run.get('config_metadata'),
                 'original_message_count': len(messages),
                 'docent_message_count': len(docent_messages),
                 'failed_message_count': task_failed_count,
