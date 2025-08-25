@@ -606,8 +606,8 @@ def stream_agent_runs_by_task(
         # Extract model from filename as fallback
         filename_model = _extract_model_from_filename(zip_name)
         
-        # Emit once per task
-        for tid, bucket in tasks_bucket.items():
+        # Emit once per task, sorted by task ID for consistent ordering
+        for tid, bucket in sorted(tasks_bucket.items(), key=lambda x: str(x[0])):
             # Extract task-specific eval results if available
             task_eval_results = None
             if include_eval_results and raw_eval_results:

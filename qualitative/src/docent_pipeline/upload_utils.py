@@ -85,6 +85,12 @@ def _upload_batched_by_model(
             continue
             
         for task_id, agent_run_data in tasks.items():
+            # Skip tasks with None data (failed during conversion)
+            if agent_run_data is None:
+                print(f"⚠️  Skipping task {task_id[:12]}...: agent_run_data is None (conversion failed)")
+                upload_stats['skipped_runs'] += 1
+                continue
+                
             model = agent_run_data.get('model', 'unknown')
             if model not in model_groups:
                 model_groups[model] = []
@@ -232,8 +238,8 @@ def _create_agent_run(zip_name: str, task_id: str, agent_run_data: Dict[str, Any
     base_model = agent_run_data.get('model', 'unknown')
     
     # Get config metadata and check for reasoning_effort
-    config_metadata = agent_run_data.get('config_metadata', {})
-    reasoning_effort = config_metadata.get('reasoning_effort')
+    config_metadata = agent_run_data.get('config_metadata', {}) or {}
+    reasoning_effort = config_metadata.get('reasoning_effort') if config_metadata else None
     
     # Append reasoning_effort to model name if present
     if reasoning_effort:

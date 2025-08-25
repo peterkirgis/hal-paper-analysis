@@ -83,49 +83,60 @@ def convert_to_docent_messages(loaded_results: Dict[str, Any]) -> Tuple[Dict[str
         docent_results[zip_name] = {}
         
         for task_id, agent_run in tasks.items():
-            messages = agent_run.get('messages', [])
-            conversion_stats['total_messages'] += len(messages)
+            try:
+                messages = agent_run.get('messages', [])
+                conversion_stats['total_messages'] += len(messages)
+                
+                # Convert each message to docent ChatMessage
+                docent_messages = []
+                task_failed_count = 0
             
-            # Convert each message to docent ChatMessage
-            docent_messages = []
-            task_failed_count = 0
-            
-            for i, msg in enumerate(messages):
-                try:
-                    # Normalize the message format first
-                    normalized_msg = normalize_message_for_docent(msg)
-                    
-                    # Parse using docent's parse_chat_message function
-                    chat_msg = parse_chat_message(normalized_msg)
-                    docent_messages.append(chat_msg)
-                    conversion_stats['successful'] += 1
-                    
-                except Exception as e:
-                    error_type = type(e).__name__
-                    conversion_stats['error_types'][error_type] = conversion_stats['error_types'].get(error_type, 0) + 1
-                    
-                    # Only print first few errors to avoid spam
-                    if conversion_stats['failed'] < 5:
-                        print(f"Warning: Failed to parse message {i} in task {task_id[:12]}...: {e}")
-                    
-                    conversion_stats['failed'] += 1
-                    task_failed_count += 1
-                    continue
-            
-            if task_failed_count > 0:
-                conversion_stats['failed_tasks'].append((task_id, task_failed_count))
-            
-            # Store the converted data
-            docent_results[zip_name][task_id] = {
-                'weave_task_id': agent_run.get('weave_task_id'),
-                'model': agent_run.get('model'),
-                'eval': agent_run.get('eval'),
-                'config_metadata': agent_run.get('config_metadata'),
-                'original_message_count': len(messages),
-                'docent_message_count': len(docent_messages),
-                'failed_message_count': task_failed_count,
-                'docent_messages': docent_messages,  # These are now ChatMessage objects
-                'original_messages': messages  # Keep original for reference
-            }
+                for i, msg in enumerate(messages):
+                    try:
+                        # Normalize the message format first
+                        normalized_msg = normalize_message_for_docent(msg)
+                        
+                        # Parse using docent's parse_chat_message function
+                        chat_msg = parse_chat_message(normalized_msg)
+                        docent_messages.append(chat_msg)
+                        conversion_stats['successful'] += 1
+                        
+                    except Exception as e:
+                        error_type = type(e).__name__
+                        conversion_stats['error_types'][error_type] = conversion_stats['error_types'].get(error_type, 0) + 1
+                        
+                        # Only print first few errors to avoid spam
+                        if conversion_stats['failed'] < 5:
+                            print(f"Warning: Failed to parse message {i} in task {task_id[:12]}...: {e}")
+                        
+                        conversion_stats['failed'] += 1
+                        task_failed_count += 1
+                        continue
+                
+                if task_failed_count > 0:
+                    conversion_stats['failed_tasks'].append((task_id, task_failed_count))
+                
+                # Store the converted data
+                docent_results[zip_name][task_id] = {
+                    'weave_task_id': agent_run.get('weave_task_id'),
+                    'model': agent_run.get('model'),
+                    'eval': agent_run.get('eval'),
+                    'config_metadata': agent_run.get('config_metadata'),
+                    'original_message_count': len(messages),
+                    'docent_message_count': len(docent_messages),
+                    'failed_message_count': task_failed_count,
+                    'docent_messages': docent_messages,  # These are now ChatMessage objects
+                    'original_messages': messages  # Keep original for reference
+                }
+                
+            except Exception as e:
+                error_type = type(e).__name__
+                conversion_stats['error_types'][error_type] = conversion_stats['error_types'].get(error_type, 0) + 1
+                
+                print(f"❌ Failed to process task {task_id[:12]}...: {e}")
+                conversion_stats['failed'] += 1
+                
+                # Set task to None to indicate complete failure
+                docent_results[zip_name][task_id] = None
     
     return docent_results, conversion_stats
