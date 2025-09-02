@@ -20,9 +20,7 @@ ASSISTANTBENCH_FILE_PATTERN = (
 
 
 class AssistantBenchMetadata(BaseBenchmarkMetadata):
-    benchmark_id: str = Field(
-        description="The benchmark that the task belongs to", default="assistant_bench"
-    )
+    pass
 
 
 def hal_assistant_bench_to_docent_assistant_bench(
@@ -32,22 +30,8 @@ def hal_assistant_bench_to_docent_assistant_bench(
     has_answer: float,
     exact_match: int,
     task_index: int,
+    config_data: dict[str, Any] = None,
 ) -> AgentRun:
-    """
-    Convert a HAL AssistantBench log entry into a Docent AssistantBench AgentRun.
-
-    Args:
-        logging_data (dict[str, Any]): Raw logging data containing model inputs and messages.
-        model_name (str): The model name to assert against the log entry.
-        score (float): Task score from evaluation.
-        has_answer (float): Whether the task has an answer.
-        exact_match (int): Whether the answer is an exact match.
-        task_index (int): Index of this task in the evaluation arrays.
-
-    Returns:
-        AgentRun: An AgentRun object containing parsed transcript messages, metadata,
-                  and evaluation results.
-    """
     assert logging_data["inputs"]["model"] == model_name
     task_id = logging_data["weave_task_id"]
 
@@ -69,9 +53,10 @@ def hal_assistant_bench_to_docent_assistant_bench(
     }
 
     metadata = AssistantBenchMetadata(
-        benchmark_id=task_id,
+        benchmark_id="assistantbench",
         task_id=task_id,
         model=model_name,
+        agent_config=config_data,
         scores=scores,
         additional_metadata=additional_metadata,
         scoring_metadata=None,
@@ -93,22 +78,12 @@ def hal_assistant_bench_to_docent_assistant_bench(
 def assistant_bench_task_processor(
     task_logs_dict, data, model_name, conversion_function, max_runs
 ):
-    """
-    Custom task processor for AssistantBench with array-based evaluation results.
-
-    Args:
-        task_logs_dict: Dictionary mapping task_id to log entries
-        data: Raw data containing eval results
-        model_name: Model name for validation
-        conversion_function: Function to convert log entry to AgentRun
-        max_runs: Maximum number of runs to process
-
-    Returns:
-        List[AgentRun]: List of converted agent runs
-    """
     from docent.data_models import AgentRun
 
     agent_runs = []
+
+    # Extract config for all tasks in this file
+    config_data = data.get("config", {})
 
     raw_eval_results = data.get("raw_eval_results", {})
     scores = raw_eval_results.get("scores", [])
@@ -132,7 +107,7 @@ def assistant_bench_task_processor(
 
         try:
             agent_run = conversion_function(
-                log_entry, model_name, score, has_answer, exact_match, i
+                log_entry, model_name, score, has_answer, exact_match, i, config_data
             )
             agent_runs.append(agent_run)
         except Exception as e:
@@ -154,9 +129,7 @@ if __name__ == "__main__":
         help="If set, process only 3 logs from 3 models (default: process all logs from all models)",
     )
     args = parser.parse_args()
-
     directory = "/Users/saitejautpala/work/hal_explore/assistant_bench_data"
-
     agent_runs, collection_name = process_benchmark_files(
         directory=directory,
         file_pattern=ASSISTANTBENCH_FILE_PATTERN,

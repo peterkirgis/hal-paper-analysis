@@ -18,6 +18,36 @@ from docent.data_models import BaseAgentRunMetadata
 from docent.data_models.chat import ChatMessage, ToolCall, parse_chat_message
 
 
+def save_failed_sanity_check_logs(task_logs: list, task_id: str, model_name: str, benchmark: str = "unknown"):
+    """
+    Save failed sanity check logs to failed_sanity_checks directory.
+    
+    Args:
+        task_logs (list): The list of logs that failed sanity check
+        task_id (str): The task ID that failed
+        model_name (str): The model name
+        benchmark (str): The benchmark name (default: "unknown")
+    """
+    # Create directory structure
+    failed_dir = os.path.join("failed_sanity_checks", benchmark)
+    os.makedirs(failed_dir, exist_ok=True)
+    
+    # Sanitize model name for file path (replace problematic characters)
+    safe_model_name = model_name.replace("/", "_").replace(":", "_").replace(" ", "_")
+    
+    # Create filename
+    filename = f"{safe_model_name}_{task_id}.json"
+    filepath = os.path.join(failed_dir, filename)
+    
+    # Save the logs
+    try:
+        with open(filepath, 'w', encoding='utf-8') as f:
+            json.dump(task_logs, f, indent=2, ensure_ascii=False)
+        print(f"   💾 Saved failed logs to: {filepath}")
+    except Exception as e:
+        print(f"   ⚠️ Failed to save logs to {filepath}: {e}")
+
+
 def extract_task_ids(filtered_logs: list, task_id_key: str = "weave_task_id") -> list:
     """
     Extract sorted unique task IDs from filtered logs.
@@ -49,14 +79,25 @@ def sanity_check(task_logs: list) -> bool:
         task_logs, key=lambda x: len(x["inputs"]["messages"]), reverse=True
     )
     largest_log = task_logs_sorted[0]
+    largest_size = len(largest_log["inputs"]["messages"])
 
     for log in task_logs_sorted[1:]:
         msgs_small = log["inputs"]["messages"]
         msgs_large = largest_log["inputs"]["messages"]
 
-        if len(msgs_small) >= len(msgs_large):
+        # If logs have the same number of messages, check if they're identical
+        if len(msgs_small) == largest_size:
+            # Check if they're actually identical (same content)
+            for i, m in enumerate(msgs_small):
+                if m != msgs_large[i]:
+                    return False  # Same size but different content - that's a violation
+            continue  # They're truly identical, skip to next
+
+        # If small log is somehow larger than largest, that's a violation
+        if len(msgs_small) > largest_size:
             return False  # sanity violation
 
+        # Check if smaller log is a prefix of larger log
         for i, m in enumerate(msgs_small):
             if m != msgs_large[i]:
                 return False  # mismatch
@@ -102,7 +143,8 @@ def task_id_to_transcript(
     model_name: str,
     system_prompt_prefix: str = "You are an expert assistant who can solve any task using code blobs",
     task_id_key: str = "weave_task_id",
-) -> dict:
+    benchmark: str = "unknown",
+) -> Tuple[dict, int]:
     """
     Build a dictionary mapping each task_id to its full transcript (messages)
     from the largest log, after sanity check.
@@ -112,9 +154,10 @@ def task_id_to_transcript(
         model_name (str): Model name to filter logs on.
         system_prompt_prefix (str, optional): Prefix that system prompt must start with.
         task_id_key (str, optional): Key for task IDs in logs. Defaults to "weave_task_id".
+        benchmark (str, optional): Benchmark name for organizing failed logs. Defaults to "unknown".
 
     Returns:
-        dict: {task_id: transcript_messages_list}
+        tuple: (transcripts_dict, failed_sanity_checks_count)
     """
     # Step 1: filter logs
     filtered_logs = filter_logs_by_model(model_name, data, system_prompt_prefix)
@@ -123,6 +166,7 @@ def task_id_to_transcript(
     task_ids = extract_task_ids(filtered_logs, task_id_key=task_id_key)
 
     transcripts = {}
+    failed_sanity_checks = 0
 
     # Step 3: process each task_id
     for task_id in task_ids:
@@ -132,7 +176,11 @@ def task_id_to_transcript(
 
         # sanity check
         if not sanity_check(task_logs):
-            raise ValueError(f"Sanity check failed for task_id={task_id}")
+            # Save failed logs to file
+            save_failed_sanity_check_logs(task_logs, task_id, model_name, benchmark)
+            failed_sanity_checks += 1
+            print(f"   ⚠️ Sanity check failed for task_id={task_id}, saved logs and continuing...")
+            continue
 
         # largest log is transcript
         task_logs_sorted = sorted(
@@ -140,7 +188,7 @@ def task_id_to_transcript(
         )
         transcripts[task_id] = task_logs_sorted[0]
 
-    return transcripts
+    return transcripts, failed_sanity_checks
 
 
 def extract_tool_calls(input_str):
@@ -219,11 +267,14 @@ def parse_messages_to_chat_messages(
 class BaseBenchmarkMetadata(BaseAgentRunMetadata):
     """Base metadata class for benchmark agent runs."""
 
-    benchmark_id: str = Field(description="The benchmark that the task belongs to")
+    benchmark_id: str = Field(description="The benchmark name")
     task_id: str = Field(
         description="The task within the benchmark that the agent is solving"
     )
     model: str = Field(description="The LLM used by the agent")
+    agent_config: Dict[str, Any] | None = Field(
+        description="Agent configuration including run parameters", default=None
+    )
     additional_metadata: Dict[str, Any] = Field(
         description="Additional metadata about the task"
     )
@@ -339,6 +390,53 @@ def analyze_benchmark_files(
     return results
 
 
+def default_task_processor(task_logs_dict, data, model_name, conversion_function, max_runs):
+    """
+    Default task processor for dictionary-based eval results.
+    
+    Args:
+        task_logs_dict: Dictionary mapping task_id to log entries
+        data: Raw data containing eval results
+        model_name: Model name for validation
+        conversion_function: Function to convert log entry to AgentRun
+        max_runs: Maximum number of runs to process
+        
+    Returns:
+        List[AgentRun]: List of converted agent runs
+    """
+    from docent.data_models import AgentRun
+    
+    agent_runs = []
+    processed = 0
+    
+    # Extract config for all tasks in this file
+    config_data = data.get("config", {})
+    
+    for task_id, log_entry in task_logs_dict.items():
+        if processed >= max_runs:
+            break
+
+        eval_results_data = data.get("raw_eval_results", {}).get(task_id)
+
+        if not eval_results_data:
+            print(
+                f"   ⚠️ No raw_eval_results found for task_id={task_id}, skipping."
+            )
+            continue
+
+        try:
+            agent_run = conversion_function(
+                log_entry, model_name, eval_results_data, config_data
+            )
+            agent_runs.append(agent_run)
+            processed += 1
+        except Exception as e:
+            print(f"   ❌ Error processing task_id={task_id}: {e}")
+            continue
+    
+    return agent_runs
+
+
 def process_benchmark_files(
     directory: str,
     file_pattern: str,
@@ -348,6 +446,7 @@ def process_benchmark_files(
     max_files: int = 5,
     max_runs_per_model: int = 5,
     system_prompt_prefix: str = "You are an expert assistant who can solve any task using code blobs",
+    task_processor=None,
 ):
     """
     Generic function to process benchmark files and return agent runs.
@@ -361,6 +460,7 @@ def process_benchmark_files(
         max_files (int): Maximum files to process in dry run
         max_runs_per_model (int): Maximum runs per model in dry run
         system_prompt_prefix (str): System prompt prefix to filter on
+        task_processor: Optional function to process tasks and return agent runs
 
     Returns:
         Tuple[List[AgentRun], str]: List of agent runs and collection name
@@ -376,6 +476,7 @@ def process_benchmark_files(
     print(f"📁 Found {len(file_model_mappings)} {collection_name_prefix} files")
 
     agent_runs: List[AgentRun] = []
+    failed_sanity_checks_by_model = {}
 
     # Step 2: Process files based on dry-run flag
     files_to_process = list(file_model_mappings.items())
@@ -399,45 +500,38 @@ def process_benchmark_files(
         model_name = model_info["model_name_from_json_content"]
 
         # Step 3: get task_id -> largest log (transcript)
-        try:
-            task_logs_dict = task_id_to_transcript(
-                data, model_name, system_prompt_prefix
-            )
-        except ValueError as e:
-            print(f"   ❌ Error processing file: {e}")
-            print(f"   ⏭️  Skipping this file and continuing...")
-            continue
+        benchmark_name = collection_name_prefix.lower().replace(" ", "_")
+        task_logs_dict, failed_count = task_id_to_transcript(
+            data, model_name, system_prompt_prefix, benchmark=benchmark_name
+        )
+        
+        # Track failed sanity checks by model
+        if failed_count > 0:
+            if model_name not in failed_sanity_checks_by_model:
+                failed_sanity_checks_by_model[model_name] = 0
+            failed_sanity_checks_by_model[model_name] += failed_count
 
-        # Step 4: iterate all task_ids for this model
+        # Step 4: process tasks using the appropriate processor
         max_runs = max_runs_per_model if dry_run else len(task_logs_dict)
-        processed_for_this_model = 0
-
-        for task_id, log_entry in task_logs_dict.items():
-            if processed_for_this_model >= max_runs:
-                break
-
-            eval_results_data = data.get("raw_eval_results", {}).get(task_id)
-
-            if not eval_results_data:
-                print(
-                    f"   ⚠️ No raw_eval_results found for task_id={task_id}, skipping."
-                )
-                continue
-
-            # Step 5: convert HAL benchmark -> Docent benchmark
-            try:
-                agent_run = conversion_function(
-                    log_entry, model_name, eval_results_data
-                )
-                agent_runs.append(agent_run)
-                processed_for_this_model += 1
-            except Exception as e:
-                print(f"   ❌ Error processing task_id={task_id}: {e}")
-                continue
-
-        print(f"   ✅ Processed {processed_for_this_model} agent runs from this file")
+        processor = task_processor or default_task_processor
+        
+        file_agent_runs = processor(task_logs_dict, data, model_name, conversion_function, max_runs)
+        agent_runs.extend(file_agent_runs)
+        
+        print(f"   ✅ Processed {len(file_agent_runs)} agent runs from this file")
 
     print(f"\n🎯 Total processed agent runs: {len(agent_runs)}")
+    
+    # Print failed sanity checks summary
+    if failed_sanity_checks_by_model:
+        print(f"\n⚠️ Sanity Check Failures Summary:")
+        for model, count in failed_sanity_checks_by_model.items():
+            print(f"   {model}: {count} failed sanity checks")
+        total_failures = sum(failed_sanity_checks_by_model.values())
+        print(f"   Total failures: {total_failures}")
+        print(f"   💾 Failed logs saved to: failed_sanity_checks/{collection_name_prefix.lower().replace(' ', '_')}/")
+    else:
+        print(f"\n✅ No sanity check failures!")
 
     collection_name = (
         f"{collection_name_prefix} Collection ({'Dry Run' if dry_run else 'Full Run'})"

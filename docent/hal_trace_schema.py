@@ -2,10 +2,10 @@ from dataclasses import dataclass
 from typing import Dict, List, Any, Optional, Union
 from datetime import datetime
 
-# Model usage counter
+
 ModelUsage = Dict[
     str, int
-]  # e.g., {'openrouter/anthropic/claude-opus-4.1': 892, 'gpt-4o': 758}
+]  
 
 
 @dataclass
@@ -29,8 +29,6 @@ class Results:
 
 @dataclass
 class Task:
-    # Define task structure based on your specific task format
-    # This is a placeholder - adjust based on actual task structure
     description: str
     requirements: List[str]
     expected_output: Any
@@ -39,11 +37,10 @@ class Task:
 @dataclass
 class RawEvalResult:
     reward: float
-    taken_actions: List[Any]  # Adjust type based on your action structure
+    taken_actions: List[Any] 
     task: Task
 
 
-# Raw logging result input structure
 @dataclass
 class LoggingInputs:
     self: Any
@@ -88,11 +85,9 @@ class GitInfo:
 
 @dataclass
 class EvaluationData:
-    """Main data structure for evaluation results"""
-
     config: Config
     results: Results
-    raw_eval_results: Dict[str, RawEvalResult]  # Keys are task IDs like '0', '1', etc.
+    raw_eval_results: Dict[str, RawEvalResult]  
     raw_logging_results: List[RawLoggingResult]
     total_usage: ModelUsage
     total_cost: float
