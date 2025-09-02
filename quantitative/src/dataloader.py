@@ -46,7 +46,7 @@ def pretty_benchmark(name: str) -> str:
         'gaia'                  : 'GAIA',
         'online_mind2web'       : 'Online Mind2Web',
         'taubench_airline'      : 'TauBench – Airline',
-        'corebench_hard'        : 'CoreBench (Hard)',
+        'corebench_hard'        : 'CORE-Bench (Hard)',
         'scicode'               : 'SciCode',
         'scienceagentbench'     : 'ScienceAgentBench',
         'swebench_verified_mini': 'SWE-bench Verified (Mini)',
@@ -117,7 +117,7 @@ def load_most_recent_df():
         'successful_tasks', 'failed_tasks', 'total_cost', 'accuracy'
     ]
     
-    # Collect all parsed_results DataFrames
+    # Collect all parsed_results DataFrames with token usage data
     parsed_results_dfs = []
     
     for db_name, tables in all_databases.items():
@@ -140,6 +140,35 @@ def load_most_recent_df():
                 
             # Reorder columns to match desired order
             df_filtered = df_filtered[desired_columns]
+            
+            # Add token usage data if available
+            if 'token_usage' in tables:
+                token_df = tables['token_usage'].copy()
+            
+                # Select token columns
+                token_columns = ['run_id', 'benchmark_name', 'model_name', 'prompt_tokens', 'completion_tokens', 'total_tokens']
+                
+                # Filter token_df to only these columns if they exist
+                filtered_token_df = token_df[[col for col in token_columns if col in token_df.columns]]
+
+                # Remove if benchmark_name is taubench_airline and model_name is "GPT-4o (August 2024)" from filtered_token_df
+                filtered_token_df = filtered_token_df[~((filtered_token_df['benchmark_name'] == 'taubench_airline') & (filtered_token_df['model_name'] == 'GPT-4o (August 2024)'))]
+
+                # Drop benchmark_name and model_name
+                filtered_token_df = filtered_token_df.drop(columns=['benchmark_name', 'model_name'])
+
+                # Merge with parsed results
+                df_filtered = df_filtered.merge(
+                    filtered_token_df, 
+                    on='run_id', 
+                    how='left')
+               
+            else:
+                print(f"No token_usage table found in {db_name}")
+                # Add empty token columns
+                for col in ['prompt_tokens', 'completion_tokens', 'total_tokens']:
+                    if col not in df_filtered.columns:
+                        df_filtered[col] = None
             
             parsed_results_dfs.append(df_filtered)
             print(f"Added {len(df_filtered)} rows from {db_name}")
@@ -164,7 +193,7 @@ def load_most_recent_df():
                      .groupby(['benchmark_name', 'agent_name'])
                      .first()
                      .reset_index())
-    
+
     print(f"Rows before filtering: {len(union_df)}")
     print(f"Rows after filtering to most recent dates: {len(most_recent_df)}")
     
@@ -215,7 +244,10 @@ def load_most_recent_df():
     
     # Add pretty benchmark labels
     most_recent_df['bench_label'] = most_recent_df['benchmark_name'].map(pretty_benchmark)
-    
+
+    # Total tokens
+    most_recent_df['total_tokens'] = most_recent_df['prompt_tokens'] + most_recent_df['completion_tokens']
+
     # Clean up model names - remove " (Month Year)" suffix and outer parentheses
     most_recent_df['model'] = most_recent_df['model'].str.replace(
         r'\s*\([A-Za-z]+\s+\d{4}\)',  # a space + "(Month Year)"
@@ -229,6 +261,46 @@ def load_most_recent_df():
     
     return most_recent_df
 
+def load_paper_df():
+    df = load_most_recent_df()
+
+    # Remove benchmarks that contain 'colbench'
+    df = df[~df['benchmark_name'].str.contains('colbench', case=False)]
+
+    # Filter to a subset of models by name
+    model_subset = [
+        'Claude Opus 4.1', 'Claude Opus 4.1 High', 'Claude-3.7 Sonnet',
+       'Claude-3.7 Sonnet High', 'DeepSeek R1', 'DeepSeek V3', 'GPT-4.1',
+       'GPT-5 Medium', 'Gemini 2.0 Flash', 'o3 Medium', 'o4-mini High',
+       'o4-mini Low'
+    ]
+
+    model_subset_df = df[df['model'].isin(model_subset)]
+
+    rate_in  = 2 / 1_000_000   # $2 per million input tokens
+    rate_out = 8 / 1_000_000   # $8 per million output tokens
+
+    mask = model_subset_df["model"].eq("o3 Medium")
+
+    model_subset_df.loc[mask, "total_cost"] = (
+        rate_in  * model_subset_df.loc[mask, "prompt_tokens"]
+    + rate_out * model_subset_df.loc[mask, "completion_tokens"]
+    )
+
+    # Remove generalist agent and secondary agent scaffolds
+    task_df = model_subset_df[~model_subset_df['agent_scaffold'].str.contains('Generalist|Zero|SeeAct')]
+
+    # filter to only corebench, taubench, and swebench for generalist comparison
+    task_df_compare = task_df[task_df['benchmark_name'].str.contains('core|tau|swe')]
+
+    # Only include generalist agent scaffold for corebench, taubench, and swebench
+    generalist_df = model_subset_df[model_subset_df['agent_scaffold'].str.contains('Generalist') & model_subset_df['benchmark_name'].str.contains('core|tau|swe')]
+
+    # Union task_df_compare and generalist_df
+    agent_df = pd.concat([task_df_compare, generalist_df])
+
+    return task_df, agent_df
+
 
 if __name__ == "__main__":
     # Example usage
@@ -238,6 +310,6 @@ if __name__ == "__main__":
     
     # Show sample of the results
     print(f"\nSample of the data:")
-    display_cols = ['benchmark_name', 'agent_scaffold', 'model', 'accuracy', 'total_cost', 'task_type']
+    display_cols = ['benchmark_name', 'agent_scaffold', 'model', 'accuracy', 'total_cost', 'prompt_tokens', 'completion_tokens', 'task_type']
     available_cols = [col for col in display_cols if col in df.columns]
     print(df[available_cols].head().to_string(index=False))
