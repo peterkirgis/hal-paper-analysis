@@ -303,7 +303,7 @@ def load_paper_df():
     agent_df = pd.concat([task_df_compare, generalist_df])
 
     # Create master dataframe including generalist agent and seeact
-    all_task_df = model_subset_df[~model_subset_df['agent_scaffold'].str.contains('Generalist|Zero')]
+    all_task_df = df[~df['agent_scaffold'].str.contains('Generalist|Zero')]
 
     benchmark_df = pd.concat([all_task_df, generalist_df])
 
