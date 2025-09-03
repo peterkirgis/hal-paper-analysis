@@ -248,6 +248,9 @@ def load_most_recent_df():
     # Total tokens
     most_recent_df['total_tokens'] = most_recent_df['prompt_tokens'] + most_recent_df['completion_tokens']
 
+    # Create model release date by filtering after first ( and before second )
+    most_recent_df['model_release_date'] = most_recent_df['model'].str.extract(r'\(([^)]+)\)')[0]
+
     # Clean up model names - remove " (Month Year)" suffix and outer parentheses
     most_recent_df['model'] = most_recent_df['model'].str.replace(
         r'\s*\([A-Za-z]+\s+\d{4}\)',  # a space + "(Month Year)"
@@ -288,10 +291,10 @@ def load_paper_df():
     )
 
     # Remove generalist agent and secondary agent scaffolds
-    task_df = model_subset_df[~model_subset_df['agent_scaffold'].str.contains('Generalist|Zero|SeeAct')]
+    model_df = model_subset_df[~model_subset_df['agent_scaffold'].str.contains('Generalist|Zero|SeeAct')]
 
     # filter to only corebench, taubench, and swebench for generalist comparison
-    task_df_compare = task_df[task_df['benchmark_name'].str.contains('core|tau|swe')]
+    task_df_compare = model_df[model_df['benchmark_name'].str.contains('core|tau|swe')]
 
     # Only include generalist agent scaffold for corebench, taubench, and swebench
     generalist_df = model_subset_df[model_subset_df['agent_scaffold'].str.contains('Generalist') & model_subset_df['benchmark_name'].str.contains('core|tau|swe')]
@@ -299,7 +302,12 @@ def load_paper_df():
     # Union task_df_compare and generalist_df
     agent_df = pd.concat([task_df_compare, generalist_df])
 
-    return task_df, agent_df
+    # Create master dataframe including generalist agent and seeact
+    all_task_df = model_subset_df[~model_subset_df['agent_scaffold'].str.contains('Generalist|Zero')]
+
+    benchmark_df = pd.concat([all_task_df, generalist_df])
+
+    return model_df, agent_df, benchmark_df
 
 
 if __name__ == "__main__":
