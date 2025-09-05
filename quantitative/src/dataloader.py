@@ -12,6 +12,42 @@ import re
 from pathlib import Path
 from sklearn.preprocessing import MinMaxScaler
 import numpy as np
+from dataclasses import dataclass
+
+
+@dataclass
+class Agent:
+    total_cost: float
+    accuracy: float
+
+
+def cross(point_o: Agent, point_a: Agent, point_b: Agent) -> int:
+    return (point_a.total_cost - point_o.total_cost) * (point_b.accuracy - point_o.accuracy) - (point_a.accuracy - point_o.accuracy) * (point_b.total_cost - point_o.total_cost)
+
+def compute_hull_side(points: list[Agent]) -> list[Agent]:
+    hull: list[Agent] = []
+    for p in points:
+        while len(hull) >= 2 and cross(hull[-2], hull[-1], p) <= 0:
+            hull.pop()
+        hull.append(p)
+    return hull
+
+def is_pareto_efficient(others, candidate):
+    for other in others:
+        if (other.total_cost <= candidate.total_cost and other.accuracy >= candidate.accuracy) and \
+           (other.total_cost < candidate.total_cost or other.accuracy > candidate.accuracy):
+            return False
+    return True
+
+def compute_pareto_frontier(points: list[Agent]) -> list[Agent]:
+    points = sorted(list(points), key=lambda p: (p.total_cost, p.accuracy))
+    if len(points) <= 1:
+        return points
+
+    upper_convex_hull = compute_hull_side(list(reversed(points)))
+    pareto_frontier = [agent for agent in upper_convex_hull if is_pareto_efficient(upper_convex_hull, agent)]
+
+    return pareto_frontier
 
 
 def load_database_tables(db_path):
@@ -259,8 +295,35 @@ def load_most_recent_df():
     )
     most_recent_df['model'] = most_recent_df['model'].str.strip('()')
     
+    # Compute Pareto efficiency by benchmark
+    print("Computing Pareto efficiency by benchmark...")
+    most_recent_df['is_pareto_efficient'] = False
+    
+    for benchmark in most_recent_df['benchmark_name'].unique():
+        benchmark_data = most_recent_df[most_recent_df['benchmark_name'] == benchmark]
+        
+        # Filter out rows with missing cost or accuracy data
+        valid_data = benchmark_data.dropna(subset=['total_cost', 'accuracy'])
+        
+        if len(valid_data) > 0:
+            # Create Agent objects
+            agents = [Agent(total_cost=row['total_cost'], accuracy=row['accuracy']) 
+                     for _, row in valid_data.iterrows()]
+            
+            # Compute Pareto frontier
+            pareto_agents = compute_pareto_frontier(agents)
+            
+            # Create set of (cost, accuracy) tuples for efficient lookup
+            pareto_points = {(agent.total_cost, agent.accuracy) for agent in pareto_agents}
+            
+            # Mark rows as Pareto efficient
+            for idx, row in valid_data.iterrows():
+                if (row['total_cost'], row['accuracy']) in pareto_points:
+                    most_recent_df.at[idx, 'is_pareto_efficient'] = True
+    
     print(f"\nFinal dataset shape: {most_recent_df.shape}")
     print(f"Date range: {most_recent_df['date'].min()} to {most_recent_df['date'].max()}")
+    print(f"Pareto efficient points: {most_recent_df['is_pareto_efficient'].sum()}")
     
     return most_recent_df
 
