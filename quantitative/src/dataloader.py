@@ -343,15 +343,60 @@ def load_paper_df():
 
     model_subset_df = df[df['model'].isin(model_subset)]
 
-    rate_in  = 2 / 1_000_000   # $2 per million input tokens
-    rate_out = 8 / 1_000_000   # $8 per million output tokens
-
-    mask = model_subset_df["model"].eq("o3 Medium")
-
-    model_subset_df.loc[mask, "total_cost"] = (
-        rate_in  * model_subset_df.loc[mask, "prompt_tokens"]
-    + rate_out * model_subset_df.loc[mask, "completion_tokens"]
-    )
+    # Import DEFAULT_PRICING from the hal-frontend db.py
+    import sys
+    from pathlib import Path
+    hal_frontend_path = Path(__file__).parent.parent / "hal-frontend" / "utils"
+    sys.path.insert(0, str(hal_frontend_path))
+    from db import DEFAULT_PRICING
+    
+    # Create model name mapping to match DEFAULT_PRICING keys
+    MODEL_NAME_MAPPING = {
+        'o3 Medium': 'o3 Medium (April 2025)',
+        'GPT-4.1': 'GPT-4.1 (April 2025)', 
+        'GPT-5 Medium': 'GPT-5 Medium (August 2025)',
+        'o4-mini High': 'o4-mini High (April 2025)',
+        'o4-mini Low': 'o4-mini Low (April 2025)',
+        'Claude-3.7 Sonnet': 'Claude-3.7 Sonnet (February 2025)',
+        'Claude-3.7 Sonnet High': 'Claude-3.7 Sonnet High (February 2025)',
+        'Claude Opus 4.1': 'Claude Opus 4.1 (August 2025)',
+        'Claude Opus 4.1 High': 'Claude Opus 4.1 High (August 2025)',
+        'DeepSeek R1': 'DeepSeek R1',
+        'DeepSeek V3': 'DeepSeek V3',
+        'Gemini 2.0 Flash': 'Gemini 2.0 Flash'
+    }
+    
+    # Calculate total_cost using DEFAULT_PRICING for all models with token data
+    print("Calculating costs using DEFAULT_PRICING...")
+    
+    for model_name in model_subset:
+        mask = model_subset_df['model'] == model_name
+        
+        # Skip if no rows for this model
+        if not mask.any():
+            continue
+            
+        # Get pricing key from mapping
+        pricing_key = MODEL_NAME_MAPPING.get(model_name, model_name)
+        
+        if pricing_key in DEFAULT_PRICING:
+            pricing = DEFAULT_PRICING[pricing_key]
+            rate_in = pricing['prompt_tokens'] / 1_000_000  # Convert to per-token rate
+            rate_out = pricing['completion_tokens'] / 1_000_000
+            
+            # Calculate cost where token data is available
+            token_mask = mask & model_subset_df['prompt_tokens'].notna() & model_subset_df['completion_tokens'].notna()
+            
+            if token_mask.any():
+                model_subset_df.loc[token_mask, 'total_cost'] = (
+                    rate_in * model_subset_df.loc[token_mask, 'prompt_tokens'] +
+                    rate_out * model_subset_df.loc[token_mask, 'completion_tokens']
+                )
+                print(f"Updated costs for {model_name} ({token_mask.sum()} rows) using rates: ${rate_in*1e6:.2f}/${rate_out*1e6:.2f} per 1M tokens")
+            else:
+                print(f"No token data available for {model_name}")
+        else:
+            print(f"No pricing data found for {model_name} (looked for key: {pricing_key})")
 
     # Remove generalist agent and secondary agent scaffolds
     model_df = model_subset_df[~model_subset_df['agent_scaffold'].str.contains('Generalist|Zero|SeeAct')]
