@@ -14,8 +14,11 @@ from docent_integration import (
 )
 
 
-ASSISTANTBENCH_FILE_PATTERN = (
+ASSISTANTBENCH_GENERALIST_PATTERN = (
     r"assistantbench_hal_generalist_agent(.+?)_\d+_UPLOAD\.json$"
+)
+ASSISTANTBENCH_SPECIALIST_PATTERN = (
+    r"assistantbench_assistantbench_browser_agent(.+?)_\d+_UPLOAD\.json$"
 )
 
 
@@ -52,10 +55,23 @@ def hal_assistant_bench_to_docent_assistant_bench(
         "exact_match": exact_match,
     }
 
+    # Extract metadata from config
+    config_metadata = extract_metadata_from_config(config_data, model_name, "assistantbench")
+    
+    # For AssistantBench, use the score as the accuracy metric
+    accuracy = float(score)
+
     metadata = AssistantBenchMetadata(
         benchmark_id="assistantbench",
         task_id=task_id,
         model=model_name,
+        model_name=config_metadata["model_name"],
+        agent_name=config_metadata["agent_name"],
+        reasoning_effort=config_metadata["reasoning_effort"],
+        budget=config_metadata["budget"],
+        date=config_metadata["date"],
+        benchmark_name=config_metadata["benchmark_name"],
+        accuracy=accuracy,
         agent_config=config_data,
         scores=scores,
         additional_metadata=additional_metadata,
@@ -94,7 +110,7 @@ def assistant_bench_task_processor(
         print(f"   ❌ No evaluation results found, skipping file")
         return agent_runs
 
-    task_ids = sorted(task_logs_dict.keys())
+    task_ids = task_logs_dict.keys()
 
     for i, task_id in enumerate(task_ids):
         if i >= max_runs or i >= len(scores):
@@ -128,13 +144,28 @@ if __name__ == "__main__":
         action="store_true",
         help="If set, process only 3 logs from 3 models (default: process all logs from all models)",
     )
+    parser.add_argument(
+        "--agent-type",
+        choices=["generalist", "specialist"],
+        default="generalist",
+        help="Type of agent data to process (generalist or specialist)",
+    )
     args = parser.parse_args()
-    directory = "/Users/saitejautpala/work/hal_explore/assistant_bench_data"
+    
+    if args.agent_type == "specialist":
+        directory = "/Users/saitejautpala/work/hal_explore/hal_traces/assistant_bench_data"
+        file_pattern = ASSISTANTBENCH_SPECIALIST_PATTERN
+        collection_prefix = "AssistantBench-Specialist"
+    else:
+        directory = "/Users/saitejautpala/work/hal_explore/assistant_bench_data"
+        file_pattern = ASSISTANTBENCH_GENERALIST_PATTERN
+        collection_prefix = "AssistantBench-Generalist"
+    
     agent_runs, collection_name = process_benchmark_files(
         directory=directory,
-        file_pattern=ASSISTANTBENCH_FILE_PATTERN,
+        file_pattern=file_pattern,
         conversion_function=hal_assistant_bench_to_docent_assistant_bench,
-        collection_name_prefix="AssistantBench",
+        collection_name_prefix=collection_prefix,
         dry_run=args.dry_run,
         max_files=3,
         max_runs_per_model=3,

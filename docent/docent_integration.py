@@ -18,6 +18,49 @@ from docent.data_models import BaseAgentRunMetadata
 from docent.data_models.chat import ChatMessage, ToolCall, parse_chat_message
 
 
+def extract_metadata_from_config(
+    config_data: Dict[str, Any] | None, 
+    model_name_from_json: str,
+    benchmark_name: str
+) -> Dict[str, Any]:
+    """
+    Extract direct metadata fields from agent configuration.
+    
+    Args:
+        config_data: Configuration data containing agent_args and other config info
+        model_name_from_json: Model name extracted from JSON logging data
+        benchmark_name: Name of the benchmark being processed
+        
+    Returns:
+        Dict containing extracted metadata fields
+    """
+    metadata = {
+        "model_name": model_name_from_json,  # Use the model from JSON as primary source
+        "agent_name": None,
+        "reasoning_effort": None,
+        "budget": None,
+        "date": None,
+        "benchmark_name": benchmark_name,
+    }
+    
+    if config_data:
+        # Extract from agent_args if available
+        agent_args = config_data.get("agent_args", {})
+        if agent_args:
+            metadata["reasoning_effort"] = agent_args.get("reasoning_effort")
+            metadata["budget"] = agent_args.get("budget")
+            
+        # Extract date and agent_name from top level config
+        metadata["date"] = config_data.get("date")
+        metadata["agent_name"] = config_data.get("agent_name")
+        
+        # If model_name is not in agent_args, try to get it from there as fallback
+        if agent_args.get("model_name") and not metadata["model_name"]:
+            metadata["model_name"] = agent_args.get("model_name")
+    
+    return metadata
+
+
 def save_failed_sanity_check_logs(task_logs: list, task_id: str, model_name: str, benchmark: str = "unknown"):
     """
     Save failed sanity check logs to failed_sanity_checks directory.
@@ -121,21 +164,27 @@ def filter_logs_by_model(
     Returns:
         list: A list of filtered log entries.
     """
-    return [
-        entry
-        for entry in data.get("raw_logging_results", [])
+    filtered_entries = []
+    for entry in data.get("raw_logging_results", []):
         if (
             entry["inputs"].get("model") == model_name
             and entry["inputs"].get("messages")
-            and isinstance(entry["inputs"]["messages"][0].get("content"), list)
             and entry["inputs"]["messages"][0].get("role") == "system"
-            and entry["inputs"]["messages"][0]["content"]
-            and isinstance(entry["inputs"]["messages"][0]["content"][0], dict)
-            and entry["inputs"]["messages"][0]["content"][0]
-            .get("text", "")
-            .startswith(system_prompt_prefix)
-        )
-    ]
+        ):
+            first_message = entry["inputs"]["messages"][0]
+            content = first_message.get("content")
+            
+            content_matches = False
+            if isinstance(content, list) and len(content) > 0 and isinstance(content[0], dict):
+                content_text = content[0].get("text", "")
+                content_matches = content_text.startswith(system_prompt_prefix)
+            elif isinstance(content, str):
+                content_matches = content.startswith(system_prompt_prefix)
+            
+            if content_matches:
+                filtered_entries.append(entry)
+    
+    return filtered_entries
 
 
 def task_id_to_transcript(
@@ -272,6 +321,16 @@ class BaseBenchmarkMetadata(BaseAgentRunMetadata):
         description="The task within the benchmark that the agent is solving"
     )
     model: str = Field(description="The LLM used by the agent")
+    
+    # Direct metadata fields
+    model_name: str = Field(description="Model name extracted from config or data")
+    agent_name: str | None = Field(description="Agent name from config", default=None)
+    reasoning_effort: str | None = Field(description="Reasoning effort level (high, medium, low, minimal, none)", default=None)
+    budget: int | float | None = Field(description="Budget limit for the agent run", default=None)
+    date: str | None = Field(description="Date of the agent run", default=None)
+    benchmark_name: str = Field(description="Name of the benchmark")
+    accuracy: float | None = Field(description="Accuracy/performance score for the benchmark", default=None)
+    
     agent_config: Dict[str, Any] | None = Field(
         description="Agent configuration including run parameters", default=None
     )
@@ -331,7 +390,10 @@ def analyze_benchmark_files(
             continue
 
         # Extract model name from file path
-        model_name_from_path = match.group(1) if match.group(1) else "default"
+        try:
+            model_name_from_path = match.group(1) if match.groups() and match.group(1) else "default"
+        except IndexError:
+            model_name_from_path = "default"
 
         # Build full file path
         file_path = os.path.join(directory, filename)
@@ -356,15 +418,21 @@ def analyze_benchmark_files(
                 and len(entry["inputs"]["messages"]) > 0
             ):
                 # Check system prompt
+               
                 first_message = entry["inputs"]["messages"][0]
+                content = first_message.get("content")
+                
+
+                content_matches = False
+                if isinstance(content, list) and len(content) > 0 and isinstance(content[0], dict):
+                    content_text = content[0].get("text", "")
+                    content_matches = content_text.startswith(system_prompt_prefix)
+                elif isinstance(content, str):
+                    content_matches = content.startswith(system_prompt_prefix)
+                
                 if (
                     first_message.get("role") == "system"
-                    and isinstance(first_message.get("content"), list)
-                    and len(first_message["content"]) > 0
-                    and isinstance(first_message["content"][0], dict)
-                    and first_message["content"][0]
-                    .get("text", "")
-                    .startswith(system_prompt_prefix)
+                    and content_matches
                 ):
                     # Extract model name
                     model = entry["inputs"].get("model")
@@ -397,7 +465,7 @@ def default_task_processor(task_logs_dict, data, model_name, conversion_function
     Args:
         task_logs_dict: Dictionary mapping task_id to log entries
         data: Raw data containing eval results
-        model_name: Model name for validation
+        model_name: Model name from file path (may be "default")
         conversion_function: Function to convert log entry to AgentRun
         max_runs: Maximum number of runs to process
         
@@ -411,6 +479,8 @@ def default_task_processor(task_logs_dict, data, model_name, conversion_function
     
     # Extract config for all tasks in this file
     config_data = data.get("config", {})
+    
+    # Use the model name from JSON extraction
     
     for task_id, log_entry in task_logs_dict.items():
         if processed >= max_runs:

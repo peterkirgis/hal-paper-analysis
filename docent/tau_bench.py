@@ -9,12 +9,14 @@ from docent import Docent
 from docent.data_models import AgentRun, Transcript
 from docent_integration import (
     BaseBenchmarkMetadata,
+    extract_metadata_from_config,
     parse_messages_to_chat_messages,
     process_benchmark_files,
 )
 
 
-TAUBENCH_FILE_PATTERN = r"taubench_airline_hal_generalist_(.+?)_\d+_UPLOAD\.json$"
+TAUBENCH_GENERALIST_PATTERN = r"taubench_airline_hal_generalist_(.+?)_\d+_UPLOAD\.json$"
+TAUBENCH_SPECIALIST_PATTERN = r"taubench_airline_taubench_few_shot_(.+?)_\d+_UPLOAD\.json$"
 
 # Global variable to track failed tasks by model
 failed_tasks_by_model = {}
@@ -54,11 +56,17 @@ def hal_tau_bench_to_docent_tau_bench(
         failed_tasks_by_model[model_name] += 1
         scores = {"reward": 0.0, "error": True}
         info = {"error": eval_results_data}
+        accuracy = 0.0
     else:
         # Normal case with dict
-        scores = {"reward": round(eval_results_data["reward"], 3)}
+        reward = round(eval_results_data["reward"], 3)
+        scores = {"reward": reward}
         info = eval_results_data["task"]
+        accuracy = reward  # For TauBench, reward is the accuracy metric
 
+    # Extract metadata from config
+    config_metadata = extract_metadata_from_config(config_data, model_name, "taubench_airline")
+    
     # Prepare metadata
     additional_metadata = info.copy() if isinstance(info, dict) else {"task_info": info}
 
@@ -66,6 +74,13 @@ def hal_tau_bench_to_docent_tau_bench(
         benchmark_id="taubench_airline",
         task_id=task_id,
         model=model_name,
+        model_name=config_metadata["model_name"],
+        agent_name=config_metadata["agent_name"],
+        reasoning_effort=config_metadata["reasoning_effort"],
+        budget=config_metadata["budget"],
+        date=config_metadata["date"],
+        benchmark_name=config_metadata["benchmark_name"],
+        accuracy=accuracy,
         agent_config=config_data,
         scores=scores,
         additional_metadata=additional_metadata,
@@ -92,16 +107,34 @@ if __name__ == "__main__":
         action="store_true",
         help="If set, process only 5 logs from 5 models (default: process all logs from all models)",
     )
+    parser.add_argument(
+        "--agent-type",
+        choices=["generalist", "specialist"],
+        default="generalist",
+        help="Type of agent data to process (generalist or specialist)",
+    )
     args = parser.parse_args()
-    directory = "/Users/saitejautpala/work/hal_explore/tau_bench_data"
+    
+    if args.agent_type == "specialist":
+        directory = "/Users/saitejautpala/work/hal_explore/hal_traces/tau_bench_data"
+        file_pattern = TAUBENCH_SPECIALIST_PATTERN
+        collection_prefix = "TauBench-Specialist"
+        system_prompt_prefix = "# Airline Agent Policy\n\nThe current time"
+    else:
+        directory = "/Users/saitejautpala/work/hal_explore/tau_bench_data"
+        file_pattern = TAUBENCH_GENERALIST_PATTERN
+        collection_prefix = "TauBench-Generalist"
+        system_prompt_prefix = "You are an expert assistant who can solve any task using code blobs"
+    
     agent_runs, collection_name = process_benchmark_files(
         directory=directory,
-        file_pattern=TAUBENCH_FILE_PATTERN,
+        file_pattern=file_pattern,
         conversion_function=hal_tau_bench_to_docent_tau_bench,
-        collection_name_prefix="TauBench",
+        collection_name_prefix=collection_prefix,
         dry_run=args.dry_run,
         max_files=5,
         max_runs_per_model=5,
+        system_prompt_prefix=system_prompt_prefix,
     )
     
     # Print failed tasks summary
