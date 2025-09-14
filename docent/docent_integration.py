@@ -19,18 +19,16 @@ from docent.data_models.chat import ChatMessage, ToolCall, parse_chat_message
 
 
 def extract_metadata_from_config(
-    config_data: Dict[str, Any] | None, 
-    model_name_from_json: str,
-    benchmark_name: str
+    config_data: Dict[str, Any] | None, model_name_from_json: str, benchmark_name: str
 ) -> Dict[str, Any]:
     """
     Extract direct metadata fields from agent configuration.
-    
+
     Args:
         config_data: Configuration data containing agent_args and other config info
         model_name_from_json: Model name extracted from JSON logging data
         benchmark_name: Name of the benchmark being processed
-        
+
     Returns:
         Dict containing extracted metadata fields
     """
@@ -40,31 +38,35 @@ def extract_metadata_from_config(
         "reasoning_effort": None,
         "budget": None,
         "date": None,
+        "run_id": None,
         "benchmark_name": benchmark_name,
     }
-    
+
     if config_data:
         # Extract from agent_args if available
         agent_args = config_data.get("agent_args", {})
         if agent_args:
             metadata["reasoning_effort"] = agent_args.get("reasoning_effort")
             metadata["budget"] = agent_args.get("budget")
-            
-        # Extract date and agent_name from top level config
+
+        # Extract date, run_id, and agent_name from top level config
         metadata["date"] = config_data.get("date")
+        metadata["run_id"] = config_data.get("run_id")
         metadata["agent_name"] = config_data.get("agent_name")
-        
+
         # If model_name is not in agent_args, try to get it from there as fallback
         if agent_args.get("model_name") and not metadata["model_name"]:
             metadata["model_name"] = agent_args.get("model_name")
-    
+
     return metadata
 
 
-def save_failed_sanity_check_logs(task_logs: list, task_id: str, model_name: str, benchmark: str = "unknown"):
+def save_failed_sanity_check_logs(
+    task_logs: list, task_id: str, model_name: str, benchmark: str = "unknown"
+):
     """
     Save failed sanity check logs to failed_sanity_checks directory.
-    
+
     Args:
         task_logs (list): The list of logs that failed sanity check
         task_id (str): The task ID that failed
@@ -74,17 +76,17 @@ def save_failed_sanity_check_logs(task_logs: list, task_id: str, model_name: str
     # Create directory structure
     failed_dir = os.path.join("failed_sanity_checks", benchmark)
     os.makedirs(failed_dir, exist_ok=True)
-    
+
     # Sanitize model name for file path (replace problematic characters)
     safe_model_name = model_name.replace("/", "_").replace(":", "_").replace(" ", "_")
-    
+
     # Create filename
     filename = f"{safe_model_name}_{task_id}.json"
     filepath = os.path.join(failed_dir, filename)
-    
+
     # Save the logs
     try:
-        with open(filepath, 'w', encoding='utf-8') as f:
+        with open(filepath, "w", encoding="utf-8") as f:
             json.dump(task_logs, f, indent=2, ensure_ascii=False)
         print(f"   💾 Saved failed logs to: {filepath}")
     except Exception as e:
@@ -105,6 +107,25 @@ def extract_task_ids(filtered_logs: list, task_id_key: str = "weave_task_id") ->
     return sorted(
         set(entry.get(task_id_key) for entry in filtered_logs if entry.get(task_id_key))
     )
+
+
+def normalize_message_for_comparison(message: dict) -> dict:
+    """
+    Normalize a message dict by removing None values and standardizing keys.
+    This ensures consistent comparison between messages that may have None values
+    vs missing keys for fields like tool_calls, function_call, etc.
+
+    Args:
+        message (dict): The message to normalize
+
+    Returns:
+        dict: Normalized message with None values removed
+    """
+    normalized = {}
+    for key, value in message.items():
+        if value is not None:
+            normalized[key] = value
+    return normalized
 
 
 def sanity_check(task_logs: list) -> bool:
@@ -132,7 +153,9 @@ def sanity_check(task_logs: list) -> bool:
         if len(msgs_small) == largest_size:
             # Check if they're actually identical (same content)
             for i, m in enumerate(msgs_small):
-                if m != msgs_large[i]:
+                normalized_small = normalize_message_for_comparison(m)
+                normalized_large = normalize_message_for_comparison(msgs_large[i])
+                if normalized_small != normalized_large:
                     return False  # Same size but different content - that's a violation
             continue  # They're truly identical, skip to next
 
@@ -142,7 +165,9 @@ def sanity_check(task_logs: list) -> bool:
 
         # Check if smaller log is a prefix of larger log
         for i, m in enumerate(msgs_small):
-            if m != msgs_large[i]:
+            normalized_small = normalize_message_for_comparison(m)
+            normalized_large = normalize_message_for_comparison(msgs_large[i])
+            if normalized_small != normalized_large:
                 return False  # mismatch
     return True
 
@@ -173,17 +198,21 @@ def filter_logs_by_model(
         ):
             first_message = entry["inputs"]["messages"][0]
             content = first_message.get("content")
-            
+
             content_matches = False
-            if isinstance(content, list) and len(content) > 0 and isinstance(content[0], dict):
+            if (
+                isinstance(content, list)
+                and len(content) > 0
+                and isinstance(content[0], dict)
+            ):
                 content_text = content[0].get("text", "")
                 content_matches = content_text.startswith(system_prompt_prefix)
             elif isinstance(content, str):
                 content_matches = content.startswith(system_prompt_prefix)
-            
+
             if content_matches:
                 filtered_entries.append(entry)
-    
+
     return filtered_entries
 
 
@@ -228,7 +257,9 @@ def task_id_to_transcript(
             # Save failed logs to file
             save_failed_sanity_check_logs(task_logs, task_id, model_name, benchmark)
             failed_sanity_checks += 1
-            print(f"   ⚠️ Sanity check failed for task_id={task_id}, saved logs and continuing...")
+            print(
+                f"   ⚠️ Sanity check failed for task_id={task_id}, saved logs and continuing..."
+            )
             continue
 
         # largest log is transcript
@@ -321,16 +352,24 @@ class BaseBenchmarkMetadata(BaseAgentRunMetadata):
         description="The task within the benchmark that the agent is solving"
     )
     model: str = Field(description="The LLM used by the agent")
-    
+    run_id: str | None = Field(description="The run ID from config", default=None)
+
     # Direct metadata fields
     model_name: str = Field(description="Model name extracted from config or data")
     agent_name: str | None = Field(description="Agent name from config", default=None)
-    reasoning_effort: str | None = Field(description="Reasoning effort level (high, medium, low, minimal, none)", default=None)
-    budget: int | float | None = Field(description="Budget limit for the agent run", default=None)
+    reasoning_effort: str | None = Field(
+        description="Reasoning effort level (high, medium, low, minimal, none)",
+        default=None,
+    )
+    budget: int | float | None = Field(
+        description="Budget limit for the agent run", default=None
+    )
     date: str | None = Field(description="Date of the agent run", default=None)
     benchmark_name: str = Field(description="Name of the benchmark")
-    accuracy: float | None = Field(description="Accuracy/performance score for the benchmark", default=None)
-    
+    accuracy: float | None = Field(
+        description="Accuracy/performance score for the benchmark", default=None
+    )
+
     agent_config: Dict[str, Any] | None = Field(
         description="Agent configuration including run parameters", default=None
     )
@@ -391,7 +430,9 @@ def analyze_benchmark_files(
 
         # Extract model name from file path
         try:
-            model_name_from_path = match.group(1) if match.groups() and match.group(1) else "default"
+            model_name_from_path = (
+                match.group(1) if match.groups() and match.group(1) else "default"
+            )
         except IndexError:
             model_name_from_path = "default"
 
@@ -418,22 +459,22 @@ def analyze_benchmark_files(
                 and len(entry["inputs"]["messages"]) > 0
             ):
                 # Check system prompt
-               
+
                 first_message = entry["inputs"]["messages"][0]
                 content = first_message.get("content")
-                
 
                 content_matches = False
-                if isinstance(content, list) and len(content) > 0 and isinstance(content[0], dict):
+                if (
+                    isinstance(content, list)
+                    and len(content) > 0
+                    and isinstance(content[0], dict)
+                ):
                     content_text = content[0].get("text", "")
                     content_matches = content_text.startswith(system_prompt_prefix)
                 elif isinstance(content, str):
                     content_matches = content.startswith(system_prompt_prefix)
-                
-                if (
-                    first_message.get("role") == "system"
-                    and content_matches
-                ):
+
+                if first_message.get("role") == "system" and content_matches:
                     # Extract model name
                     model = entry["inputs"].get("model")
                     if model:
@@ -458,30 +499,32 @@ def analyze_benchmark_files(
     return results
 
 
-def default_task_processor(task_logs_dict, data, model_name, conversion_function, max_runs):
+def default_task_processor(
+    task_logs_dict, data, model_name, conversion_function, max_runs
+):
     """
     Default task processor for dictionary-based eval results.
-    
+
     Args:
         task_logs_dict: Dictionary mapping task_id to log entries
         data: Raw data containing eval results
         model_name: Model name from file path (may be "default")
         conversion_function: Function to convert log entry to AgentRun
         max_runs: Maximum number of runs to process
-        
+
     Returns:
         List[AgentRun]: List of converted agent runs
     """
     from docent.data_models import AgentRun
-    
+
     agent_runs = []
     processed = 0
-    
+
     # Extract config for all tasks in this file
     config_data = data.get("config", {})
-    
+
     # Use the model name from JSON extraction
-    
+
     for task_id, log_entry in task_logs_dict.items():
         if processed >= max_runs:
             break
@@ -489,9 +532,7 @@ def default_task_processor(task_logs_dict, data, model_name, conversion_function
         eval_results_data = data.get("raw_eval_results", {}).get(task_id)
 
         if not eval_results_data:
-            print(
-                f"   ⚠️ No raw_eval_results found for task_id={task_id}, skipping."
-            )
+            print(f"   ⚠️ No raw_eval_results found for task_id={task_id}, skipping.")
             continue
 
         try:
@@ -503,30 +544,8 @@ def default_task_processor(task_logs_dict, data, model_name, conversion_function
         except Exception as e:
             print(f"   ❌ Error processing task_id={task_id}: {e}")
             continue
-    
+
     return agent_runs
-
-
-def collect_eval_failure_stats(task_logs_dict: dict, data: dict, model_name: str) -> int:
-    """
-    Collect statistics on evaluation failures for a given model.
-    
-    Args:
-        task_logs_dict: Dictionary mapping task_id to log entries
-        data: Raw data containing eval results
-        model_name: Model name
-        
-    Returns:
-        int: Number of evaluation failures
-    """
-    eval_failures = 0
-    
-    for task_id in task_logs_dict.keys():
-        eval_results_data = data.get("raw_eval_results", {}).get(task_id)
-        if not eval_results_data:
-            eval_failures += 1
-    
-    return eval_failures
 
 
 def process_benchmark_files(
@@ -534,10 +553,10 @@ def process_benchmark_files(
     file_pattern: str,
     conversion_function,
     collection_name_prefix: str,
+    system_prompt_prefix: str,
     dry_run: bool = False,
     max_files: int = 5,
     max_runs_per_model: int = 5,
-    system_prompt_prefix: str = "You are an expert assistant who can solve any task using code blobs",
     task_processor=None,
     generate_report: bool = True,
 ):
@@ -600,17 +619,26 @@ def process_benchmark_files(
         task_logs_dict, failed_count = task_id_to_transcript(
             data, model_name, system_prompt_prefix, benchmark=benchmark_name
         )
-        
+
         # Initialize model stats if not exists
         if model_name not in model_success_stats:
+            # In dry run mode, we limit the runs, so total_tasks_attempted should reflect actual processing
+            total_tasks_available = len(task_logs_dict) + failed_count
+            max_runs_to_process = (
+                max_runs_per_model if dry_run else total_tasks_available
+            )
+
             model_success_stats[model_name] = {
-                "total_tasks_attempted": len(task_logs_dict) + failed_count,
+                "total_tasks_attempted": total_tasks_available,
+                "total_tasks_processed": min(
+                    max_runs_to_process, len(task_logs_dict)
+                ),  # Actual tasks we'll process
                 "successful_runs": 0,
                 "sanity_check_failures": 0,
                 "eval_failures": 0,
-                "success_rate": 0.0
+                "success_rate": 0.0,
             }
-        
+
         # Track failed sanity checks by model
         if failed_count > 0:
             if model_name not in failed_sanity_checks_by_model:
@@ -618,33 +646,28 @@ def process_benchmark_files(
             failed_sanity_checks_by_model[model_name] += failed_count
             model_success_stats[model_name]["sanity_check_failures"] = failed_count
 
-        # Collect evaluation failure statistics
-        eval_failures_count = collect_eval_failure_stats(task_logs_dict, data, model_name)
-        if eval_failures_count > 0:
-            if model_name not in eval_failures_by_model:
-                eval_failures_by_model[model_name] = 0
-            eval_failures_by_model[model_name] += eval_failures_count
-            model_success_stats[model_name]["eval_failures"] = eval_failures_count
-
         # Step 4: process tasks using the appropriate processor
         max_runs = max_runs_per_model if dry_run else len(task_logs_dict)
         processor = task_processor or default_task_processor
-        
-        file_agent_runs = processor(task_logs_dict, data, model_name, conversion_function, max_runs)
+
+        file_agent_runs = processor(
+            task_logs_dict, data, model_name, conversion_function, max_runs
+        )
         agent_runs.extend(file_agent_runs)
-        
+
         # Update success statistics
         model_success_stats[model_name]["successful_runs"] = len(file_agent_runs)
-        total_attempted = model_success_stats[model_name]["total_tasks_attempted"]
-        if total_attempted > 0:
-            model_success_stats[model_name]["success_rate"] = (len(file_agent_runs) / total_attempted) * 100
-        
+        # Use total_tasks_processed for dry run mode to get accurate success rate
+        total_processed = model_success_stats[model_name]["total_tasks_processed"]
+        if total_processed > 0:
+            model_success_stats[model_name]["success_rate"] = (
+                len(file_agent_runs) / total_processed
+            ) * 100
+
         print(f"   ✅ Processed {len(file_agent_runs)} agent runs from this file")
-        if eval_failures_count > 0:
-            print(f"   ⚠️ {eval_failures_count} evaluation failures detected")
 
     print(f"\n🎯 Total processed agent runs: {len(agent_runs)}")
-    
+
     # Print failed sanity checks summary
     if failed_sanity_checks_by_model:
         print(f"\n⚠️ Sanity Check Failures Summary:")
@@ -652,39 +675,48 @@ def process_benchmark_files(
             print(f"   {model}: {count} failed sanity checks")
         total_sanity_failures = sum(failed_sanity_checks_by_model.values())
         print(f"   Total failures: {total_sanity_failures}")
-        print(f"   💾 Failed logs saved to: failed_sanity_checks/{collection_name_prefix.lower().replace(' ', '_')}/")
+        print(
+            f"   💾 Failed logs saved to: failed_sanity_checks/{collection_name_prefix.lower().replace(' ', '_')}/"
+        )
     else:
         print(f"\n✅ No sanity check failures!")
-
-    # Print evaluation failures summary
-    if eval_failures_by_model:
-        print(f"\n⚠️ Evaluation Failures Summary:")
-        for model, count in eval_failures_by_model.items():
-            print(f"   {model}: {count} evaluation failures")
-        total_eval_failures = sum(eval_failures_by_model.values())
-        print(f"   Total evaluation failures: {total_eval_failures}")
-    else:
-        print(f"\n✅ No evaluation failures!")
 
     # Print model success statistics
     if model_success_stats:
         print(f"\n📊 Model Success Statistics:")
         # Sort by success rate (highest first)
-        sorted_models = sorted(model_success_stats.items(), 
-                              key=lambda x: x[1].get('success_rate', 0), reverse=True)
-        
+        sorted_models = sorted(
+            model_success_stats.items(),
+            key=lambda x: x[1].get("success_rate", 0),
+            reverse=True,
+        )
+
         for model, stats in sorted_models:
-            success_rate = stats.get('success_rate', 0)
-            successful_runs = stats.get('successful_runs', 0)
-            total_attempted = stats.get('total_tasks_attempted', 0)
-            sanity_failures = stats.get('sanity_check_failures', 0)
-            eval_failures = stats.get('eval_failures', 0)
-            
-            status_emoji = "✅" if success_rate >= 90 else "⚠️" if success_rate >= 70 else "❌"
-            
-            print(f"   {status_emoji} {model}: {success_rate:.1f}% success ({successful_runs}/{total_attempted} runs)")
+            success_rate = stats.get("success_rate", 0)
+            successful_runs = stats.get("successful_runs", 0)
+            total_processed = stats.get("total_tasks_processed", 0)
+            total_attempted = stats.get("total_tasks_attempted", 0)
+            sanity_failures = stats.get("sanity_check_failures", 0)
+            eval_failures = stats.get("eval_failures", 0)
+
+            status_emoji = (
+                "✅" if success_rate >= 90 else "⚠️" if success_rate >= 70 else "❌"
+            )
+
+            # Show different format for dry run vs full run
+            if dry_run:
+                print(
+                    f"   {status_emoji} {model}: {success_rate:.1f}% success ({successful_runs}/{total_processed} runs processed, {total_attempted} available)"
+                )
+            else:
+                print(
+                    f"   {status_emoji} {model}: {success_rate:.1f}% success ({successful_runs}/{total_processed} runs)"
+                )
+
             if sanity_failures > 0 or eval_failures > 0:
-                print(f"      └─ Failures: {sanity_failures} sanity, {eval_failures} eval")
+                print(
+                    f"      └─ Failures: {sanity_failures} sanity, {eval_failures} eval"
+                )
 
     collection_name = (
         f"{collection_name_prefix} Collection ({'Dry Run' if dry_run else 'Full Run'})"
@@ -695,27 +727,29 @@ def process_benchmark_files(
     if generate_report:
         try:
             from report_generator import generate_benchmark_report
-            
+
             processing_summary = {
                 "total_files_processed": len(files_to_process),
                 "total_runs_processed": len(agent_runs),
                 "dry_run_mode": dry_run,
                 "max_files_limit": max_files if dry_run else "No limit",
-                "max_runs_per_model_limit": max_runs_per_model if dry_run else "No limit",
-                "model_success_stats": model_success_stats
+                "max_runs_per_model_limit": max_runs_per_model
+                if dry_run
+                else "No limit",
+                "model_success_stats": model_success_stats,
             }
-            
+
             report_path = generate_benchmark_report(
                 benchmark_name=collection_name_prefix,
                 sanity_check_failures=failed_sanity_checks_by_model,
                 eval_failures=eval_failures_by_model,
                 total_files_processed=len(files_to_process),
                 total_runs_processed=len(agent_runs),
-                processing_summary=processing_summary
+                processing_summary=processing_summary,
             )
-            
+
             print(f"\n📄 PDF Report generated: {report_path}")
-            
+
         except ImportError:
             print(f"\n⚠️ Could not generate PDF report - reportlab not available")
         except Exception as e:

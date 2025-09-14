@@ -57,8 +57,10 @@ def hal_assistant_bench_to_docent_assistant_bench(
     }
 
     # Extract metadata from config
-    config_metadata = extract_metadata_from_config(config_data, model_name, "assistantbench")
-    
+    config_metadata = extract_metadata_from_config(
+        config_data, model_name, "assistantbench"
+    )
+
     # For AssistantBench, use the score as the accuracy metric
     accuracy = float(score)
 
@@ -66,6 +68,7 @@ def hal_assistant_bench_to_docent_assistant_bench(
         benchmark_id="assistantbench",
         task_id=task_id,
         model=model_name,
+        run_id=config_metadata["run_id"],
         model_name=config_metadata["model_name"],
         agent_name=config_metadata["agent_name"],
         reasoning_effort=config_metadata["reasoning_effort"],
@@ -152,21 +155,26 @@ if __name__ == "__main__":
         help="Type of agent data to process (generalist or specialist)",
     )
     args = parser.parse_args()
-    
+
     if args.agent_type == "specialist":
         directory = os.path.join(os.getcwd(), "hal_traces", "assistant_bench_data")
         file_pattern = ASSISTANTBENCH_SPECIALIST_PATTERN
         collection_prefix = "AssistantBench-Specialist"
+        system_prompt_prefix = (
+            "You are a specialist browser agent"  # Specialist-specific prompt
+        )
     else:
         directory = os.path.join(os.getcwd(), "hal_traces", "assistant_bench_data")
         file_pattern = ASSISTANTBENCH_GENERALIST_PATTERN
         collection_prefix = "AssistantBench-Generalist"
-    
+        system_prompt_prefix = "You are an expert assistant who can solve any task using code blobs"  # Generalist prompt
+
     agent_runs, collection_name, report_path = process_benchmark_files(
         directory=directory,
         file_pattern=file_pattern,
         conversion_function=hal_assistant_bench_to_docent_assistant_bench,
         collection_name_prefix=collection_prefix,
+        system_prompt_prefix=system_prompt_prefix,
         dry_run=args.dry_run,
         max_files=3,
         max_runs_per_model=3,
@@ -187,17 +195,17 @@ if __name__ == "__main__":
     # Upload agent runs in chunks to avoid payload size limits
     chunk_size = 300
     total_runs = len(agent_runs)
-    
+
     for i in range(0, total_runs, chunk_size):
-        chunk = agent_runs[i:i + chunk_size]
+        chunk = agent_runs[i : i + chunk_size]
         chunk_num = (i // chunk_size) + 1
         total_chunks = (total_runs + chunk_size - 1) // chunk_size
-        
+
         print(f"📤 Uploading chunk {chunk_num}/{total_chunks} ({len(chunk)} runs)...")
         client.add_agent_runs(collection_id, chunk)
 
     print(f"✅ Uploaded {len(agent_runs)} agent runs to collection {collection_id}")
     print(f"📊 Collection: {collection_name}")
-    
+
     if report_path:
         print(f"📄 Analysis report: {report_path}")

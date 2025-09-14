@@ -15,7 +15,9 @@ from docent_integration import (
 )
 
 
-COREBENCH_GENERALIST_PATTERN = r"corebench_hard_hal_generalist_agent(.+?)_\d+_UPLOAD\.json$"
+COREBENCH_GENERALIST_PATTERN = (
+    r"corebench_hard_hal_generalist_agent(.+?)_\d+_UPLOAD\.json$"
+)
 COREBENCH_SPECIALIST_PATTERN = r"corebench_hard_coreagent_\d+_UPLOAD\.json$"
 
 
@@ -24,7 +26,10 @@ class CoreBenchMetadata(BaseBenchmarkMetadata):
 
 
 def hal_core_bench_to_docent_core_bench(
-    logging_data: dict[str, Any], model_name: str, eval_results_data: dict[str, Any], config_data: dict[str, Any] = None
+    logging_data: dict[str, Any],
+    model_name: str,
+    eval_results_data: dict[str, Any],
+    config_data: dict[str, Any] = None,
 ) -> AgentRun:
     """
     Convert a HAL CoreBench log entry into a Docent CoreBench AgentRun.
@@ -65,12 +70,15 @@ def hal_core_bench_to_docent_core_bench(
     additional_metadata = dict(eval_results_data)
 
     # Extract metadata from config
-    config_metadata = extract_metadata_from_config(config_data, model_name, "corebench_hard")
+    config_metadata = extract_metadata_from_config(
+        config_data, model_name, "corebench_hard"
+    )
 
     metadata = CoreBenchMetadata(
         benchmark_id="corebench_hard",
         task_id=task_id,
         model=model_name,
+        run_id=config_metadata["run_id"],
         model_name=config_metadata["model_name"],
         agent_name=config_metadata["agent_name"],
         reasoning_effort=config_metadata["reasoning_effort"],
@@ -120,16 +128,22 @@ if __name__ == "__main__":
         directory = os.path.join(os.getcwd(), "hal_traces", "core_bench_data")
         file_pattern = COREBENCH_SPECIALIST_PATTERN
         collection_prefix = "CoreBench-Specialist"
+        system_prompt_prefix = (
+            "You are an expert assistant who can solve any task using code blobs"
+        )
     else:
         directory = os.path.join(os.getcwd(), "hal_traces", "core_bench_data")
         file_pattern = COREBENCH_GENERALIST_PATTERN
         collection_prefix = "CoreBench-Generalist"
-
+        system_prompt_prefix = (
+            "You are an expert assistant who can solve any task using code blobs"
+        )
     agent_runs, collection_name, report_path = process_benchmark_files(
         directory=directory,
         file_pattern=file_pattern,
         conversion_function=hal_core_bench_to_docent_core_bench,
         collection_name_prefix=collection_prefix,
+        system_prompt_prefix=system_prompt_prefix,
         dry_run=args.dry_run,
         max_files=3,
         max_runs_per_model=3,
@@ -149,17 +163,17 @@ if __name__ == "__main__":
     # Upload agent runs in chunks to avoid payload size limits
     chunk_size = 300
     total_runs = len(agent_runs)
-    
+
     for i in range(0, total_runs, chunk_size):
-        chunk = agent_runs[i:i + chunk_size]
+        chunk = agent_runs[i : i + chunk_size]
         chunk_num = (i // chunk_size) + 1
         total_chunks = (total_runs + chunk_size - 1) // chunk_size
-        
+
         print(f"📤 Uploading chunk {chunk_num}/{total_chunks} ({len(chunk)} runs)...")
         client.add_agent_runs(collection_id, chunk)
 
     print(f"✅ Uploaded {len(agent_runs)} agent runs to collection {collection_id}")
     print(f"📊 Collection: {collection_name}")
-    
+
     if report_path:
         print(f"📄 Analysis report: {report_path}")

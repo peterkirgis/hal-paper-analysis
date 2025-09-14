@@ -3,9 +3,7 @@ from typing import Dict, List, Any, Optional, Union
 from datetime import datetime
 
 
-ModelUsage = Dict[
-    str, int
-]  
+ModelUsage = Dict[str, int]
 
 
 @dataclass
@@ -37,7 +35,7 @@ class Task:
 @dataclass
 class RawEvalResult:
     reward: float
-    taken_actions: List[Any] 
+    taken_actions: List[Any]
     task: Task
 
 
@@ -87,7 +85,7 @@ class GitInfo:
 class EvaluationData:
     config: Config
     results: Results
-    raw_eval_results: Dict[str, RawEvalResult]  
+    raw_eval_results: Dict[str, RawEvalResult]
     raw_logging_results: List[RawLoggingResult]
     total_usage: ModelUsage
     total_cost: float

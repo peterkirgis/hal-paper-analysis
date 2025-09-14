@@ -16,7 +16,9 @@ from docent_integration import (
 
 
 TAUBENCH_GENERALIST_PATTERN = r"taubench_airline_hal_generalist_(.+?)_\d+_UPLOAD\.json$"
-TAUBENCH_SPECIALIST_PATTERN = r"taubench_airline_taubench_few_shot_(.+?)_\d+_UPLOAD\.json$"
+TAUBENCH_SPECIALIST_PATTERN = (
+    r"taubench_airline_taubench_fewshot_(.+?)_\d+_UPLOAD\.json$"
+)
 
 # Global variable to track failed tasks by model
 failed_tasks_by_model = {}
@@ -27,7 +29,10 @@ class TauBenchMetadata(BaseBenchmarkMetadata):
 
 
 def hal_tau_bench_to_docent_tau_bench(
-    logging_data: dict[str, Any], model_name: str, eval_results_data: Any, config_data: dict[str, Any] = None
+    logging_data: dict[str, Any],
+    model_name: str,
+    eval_results_data: Any,
+    config_data: dict[str, Any] = None,
 ) -> AgentRun:
     """
     Convert a HAL TauBench log entry into a Docent TauBench AgentRun.
@@ -45,7 +50,7 @@ def hal_tau_bench_to_docent_tau_bench(
     task_id = logging_data["weave_task_id"]
     trajectories = logging_data["inputs"]["messages"]
     messages = parse_messages_to_chat_messages(trajectories)
-    
+
     # Handle case where eval_results_data is an error string instead of dict
     if isinstance(eval_results_data, str):
         # Task failed, create default values
@@ -65,8 +70,10 @@ def hal_tau_bench_to_docent_tau_bench(
         accuracy = reward  # For TauBench, reward is the accuracy metric
 
     # Extract metadata from config
-    config_metadata = extract_metadata_from_config(config_data, model_name, "taubench_airline")
-    
+    config_metadata = extract_metadata_from_config(
+        config_data, model_name, "taubench_airline"
+    )
+
     # Prepare metadata
     additional_metadata = info.copy() if isinstance(info, dict) else {"task_info": info}
 
@@ -74,6 +81,7 @@ def hal_tau_bench_to_docent_tau_bench(
         benchmark_id="taubench_airline",
         task_id=task_id,
         model=model_name,
+        run_id=config_metadata["run_id"],
         model_name=config_metadata["model_name"],
         agent_name=config_metadata["agent_name"],
         reasoning_effort=config_metadata["reasoning_effort"],
@@ -114,7 +122,7 @@ if __name__ == "__main__":
         help="Type of agent data to process (generalist or specialist)",
     )
     args = parser.parse_args()
-    
+
     if args.agent_type == "specialist":
         directory = os.path.join(os.getcwd(), "hal_traces", "tau_bench_data")
         file_pattern = TAUBENCH_SPECIALIST_PATTERN
@@ -124,19 +132,21 @@ if __name__ == "__main__":
         directory = os.path.join(os.getcwd(), "hal_traces", "tau_bench_data")
         file_pattern = TAUBENCH_GENERALIST_PATTERN
         collection_prefix = "TauBench-Generalist"
-        system_prompt_prefix = "You are an expert assistant who can solve any task using code blobs"
-    
+        system_prompt_prefix = (
+            "You are an expert assistant who can solve any task using code blobs"
+        )
+
     agent_runs, collection_name, report_path = process_benchmark_files(
         directory=directory,
         file_pattern=file_pattern,
         conversion_function=hal_tau_bench_to_docent_tau_bench,
         collection_name_prefix=collection_prefix,
+        system_prompt_prefix=system_prompt_prefix,
         dry_run=args.dry_run,
         max_files=5,
         max_runs_per_model=5,
-        system_prompt_prefix=system_prompt_prefix,
     )
-    
+
     # Print failed tasks summary
     if failed_tasks_by_model:
         print(f"\n📊 Failed Tasks Summary (Tracebacks):")
@@ -160,16 +170,16 @@ if __name__ == "__main__":
     # Upload agent runs in chunks to avoid payload size limits
     chunk_size = 300
     total_runs = len(agent_runs)
-    
+
     for i in range(0, total_runs, chunk_size):
-        chunk = agent_runs[i:i + chunk_size]
+        chunk = agent_runs[i : i + chunk_size]
         chunk_num = (i // chunk_size) + 1
         total_chunks = (total_runs + chunk_size - 1) // chunk_size
-        
+
         print(f"📤 Uploading chunk {chunk_num}/{total_chunks} ({len(chunk)} runs)...")
         client.add_agent_runs(collection_id, chunk)
     print(f"✅ Uploaded {len(agent_runs)} agent runs to collection {collection_id}")
     print(f"📊 Collection: {collection_name}")
-    
+
     if report_path:
         print(f"📄 Analysis report: {report_path}")

@@ -424,9 +424,12 @@ class BenchmarkReportGenerator:
             # Create detailed success table
             success_data = []
             for model, stats in model_success_stats.items():
+                # Use total_tasks_processed for the table to show what was actually processed
+                total_processed = stats.get("total_tasks_processed", stats.get("total_tasks_attempted", 0))
                 success_data.append([
                     model,
                     str(stats.get("total_tasks_attempted", 0)),
+                    str(total_processed),
                     str(stats.get("successful_runs", 0)),
                     str(stats.get("sanity_check_failures", 0)),
                     str(stats.get("eval_failures", 0)),
@@ -434,11 +437,11 @@ class BenchmarkReportGenerator:
                 ])
             
             # Sort by success rate (highest first)
-            success_data.sort(key=lambda x: float(x[5].replace('%', '')), reverse=True)
+            success_data.sort(key=lambda x: float(x[6].replace('%', '')), reverse=True)
             
             success_table = self.create_summary_table(
                 success_data,
-                ["Model", "Tasks Attempted", "Successful Runs", "Sanity Failures", "Eval Failures", "Success Rate"]
+                ["Model", "Tasks Available", "Tasks Processed", "Successful Runs", "Sanity Failures", "Eval Failures", "Success Rate"]
             )
             story.append(success_table)
             story.append(Spacer(1, 15))
