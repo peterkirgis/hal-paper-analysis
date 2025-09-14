@@ -97,11 +97,11 @@ if __name__ == "__main__":
         file_pattern = SCICODE_SPECIALIST_PATTERN
         collection_prefix = "SciCode-Specialist"
     else:
-        directory = "/Users/saitejautpala/work/hal_explore/sci_code_data"
+        directory = "/Users/saitejautpala/work/hal_explore/hal_traces/sci_code_data"
         file_pattern = SCICODE_GENERALIST_PATTERN
         collection_prefix = "SciCode-Generalist"
 
-    agent_runs, collection_name = process_benchmark_files(
+    agent_runs, collection_name, report_path = process_benchmark_files(
         directory=directory,
         file_pattern=file_pattern,
         conversion_function=hal_sci_code_to_docent_sci_code,
@@ -122,7 +122,20 @@ if __name__ == "__main__":
         description=f"SciCode agent runs - {len(agent_runs)} runs processed",
     )
 
-    client.add_agent_runs(collection_id, agent_runs)
+    # Upload agent runs in chunks to avoid payload size limits
+    chunk_size = 300
+    total_runs = len(agent_runs)
+    
+    for i in range(0, total_runs, chunk_size):
+        chunk = agent_runs[i:i + chunk_size]
+        chunk_num = (i // chunk_size) + 1
+        total_chunks = (total_runs + chunk_size - 1) // chunk_size
+        
+        print(f"📤 Uploading chunk {chunk_num}/{total_chunks} ({len(chunk)} runs)...")
+        client.add_agent_runs(collection_id, chunk)
 
     print(f"✅ Uploaded {len(agent_runs)} agent runs to collection {collection_id}")
     print(f"📊 Collection: {collection_name}")
+    
+    if report_path:
+        print(f"📄 Analysis report: {report_path}")

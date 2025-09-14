@@ -121,12 +121,12 @@ if __name__ == "__main__":
         collection_prefix = "TauBench-Specialist"
         system_prompt_prefix = "# Airline Agent Policy\n\nThe current time"
     else:
-        directory = "/Users/saitejautpala/work/hal_explore/tau_bench_data"
+        directory = "/Users/saitejautpala/work/hal_explore/hal_traces/tau_bench_data"
         file_pattern = TAUBENCH_GENERALIST_PATTERN
         collection_prefix = "TauBench-Generalist"
         system_prompt_prefix = "You are an expert assistant who can solve any task using code blobs"
     
-    agent_runs, collection_name = process_benchmark_files(
+    agent_runs, collection_name, report_path = process_benchmark_files(
         directory=directory,
         file_pattern=file_pattern,
         conversion_function=hal_tau_bench_to_docent_tau_bench,
@@ -157,6 +157,19 @@ if __name__ == "__main__":
         name=collection_name,
         description=f"TauBench agent runs - {len(agent_runs)} runs processed",
     )
-    client.add_agent_runs(collection_id, agent_runs)
+    # Upload agent runs in chunks to avoid payload size limits
+    chunk_size = 300
+    total_runs = len(agent_runs)
+    
+    for i in range(0, total_runs, chunk_size):
+        chunk = agent_runs[i:i + chunk_size]
+        chunk_num = (i // chunk_size) + 1
+        total_chunks = (total_runs + chunk_size - 1) // chunk_size
+        
+        print(f"📤 Uploading chunk {chunk_num}/{total_chunks} ({len(chunk)} runs)...")
+        client.add_agent_runs(collection_id, chunk)
     print(f"✅ Uploaded {len(agent_runs)} agent runs to collection {collection_id}")
     print(f"📊 Collection: {collection_name}")
+    
+    if report_path:
+        print(f"📄 Analysis report: {report_path}")

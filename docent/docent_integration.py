@@ -507,6 +507,28 @@ def default_task_processor(task_logs_dict, data, model_name, conversion_function
     return agent_runs
 
 
+def collect_eval_failure_stats(task_logs_dict: dict, data: dict, model_name: str) -> int:
+    """
+    Collect statistics on evaluation failures for a given model.
+    
+    Args:
+        task_logs_dict: Dictionary mapping task_id to log entries
+        data: Raw data containing eval results
+        model_name: Model name
+        
+    Returns:
+        int: Number of evaluation failures
+    """
+    eval_failures = 0
+    
+    for task_id in task_logs_dict.keys():
+        eval_results_data = data.get("raw_eval_results", {}).get(task_id)
+        if not eval_results_data:
+            eval_failures += 1
+    
+    return eval_failures
+
+
 def process_benchmark_files(
     directory: str,
     file_pattern: str,
@@ -517,6 +539,7 @@ def process_benchmark_files(
     max_runs_per_model: int = 5,
     system_prompt_prefix: str = "You are an expert assistant who can solve any task using code blobs",
     task_processor=None,
+    generate_report: bool = True,
 ):
     """
     Generic function to process benchmark files and return agent runs.
@@ -531,9 +554,10 @@ def process_benchmark_files(
         max_runs_per_model (int): Maximum runs per model in dry run
         system_prompt_prefix (str): System prompt prefix to filter on
         task_processor: Optional function to process tasks and return agent runs
+        generate_report (bool): Whether to generate a PDF report of the results
 
     Returns:
-        Tuple[List[AgentRun], str]: List of agent runs and collection name
+        Tuple[List[AgentRun], str, str]: List of agent runs, collection name, and report path (if generated)
     """
     from docent.data_models import AgentRun
 
@@ -547,6 +571,8 @@ def process_benchmark_files(
 
     agent_runs: List[AgentRun] = []
     failed_sanity_checks_by_model = {}
+    eval_failures_by_model = {}
+    model_success_stats = {}  # Track success stats by model
 
     # Step 2: Process files based on dry-run flag
     files_to_process = list(file_model_mappings.items())
@@ -575,11 +601,30 @@ def process_benchmark_files(
             data, model_name, system_prompt_prefix, benchmark=benchmark_name
         )
         
+        # Initialize model stats if not exists
+        if model_name not in model_success_stats:
+            model_success_stats[model_name] = {
+                "total_tasks_attempted": len(task_logs_dict) + failed_count,
+                "successful_runs": 0,
+                "sanity_check_failures": 0,
+                "eval_failures": 0,
+                "success_rate": 0.0
+            }
+        
         # Track failed sanity checks by model
         if failed_count > 0:
             if model_name not in failed_sanity_checks_by_model:
                 failed_sanity_checks_by_model[model_name] = 0
             failed_sanity_checks_by_model[model_name] += failed_count
+            model_success_stats[model_name]["sanity_check_failures"] = failed_count
+
+        # Collect evaluation failure statistics
+        eval_failures_count = collect_eval_failure_stats(task_logs_dict, data, model_name)
+        if eval_failures_count > 0:
+            if model_name not in eval_failures_by_model:
+                eval_failures_by_model[model_name] = 0
+            eval_failures_by_model[model_name] += eval_failures_count
+            model_success_stats[model_name]["eval_failures"] = eval_failures_count
 
         # Step 4: process tasks using the appropriate processor
         max_runs = max_runs_per_model if dry_run else len(task_logs_dict)
@@ -588,7 +633,15 @@ def process_benchmark_files(
         file_agent_runs = processor(task_logs_dict, data, model_name, conversion_function, max_runs)
         agent_runs.extend(file_agent_runs)
         
+        # Update success statistics
+        model_success_stats[model_name]["successful_runs"] = len(file_agent_runs)
+        total_attempted = model_success_stats[model_name]["total_tasks_attempted"]
+        if total_attempted > 0:
+            model_success_stats[model_name]["success_rate"] = (len(file_agent_runs) / total_attempted) * 100
+        
         print(f"   ✅ Processed {len(file_agent_runs)} agent runs from this file")
+        if eval_failures_count > 0:
+            print(f"   ⚠️ {eval_failures_count} evaluation failures detected")
 
     print(f"\n🎯 Total processed agent runs: {len(agent_runs)}")
     
@@ -597,14 +650,75 @@ def process_benchmark_files(
         print(f"\n⚠️ Sanity Check Failures Summary:")
         for model, count in failed_sanity_checks_by_model.items():
             print(f"   {model}: {count} failed sanity checks")
-        total_failures = sum(failed_sanity_checks_by_model.values())
-        print(f"   Total failures: {total_failures}")
+        total_sanity_failures = sum(failed_sanity_checks_by_model.values())
+        print(f"   Total failures: {total_sanity_failures}")
         print(f"   💾 Failed logs saved to: failed_sanity_checks/{collection_name_prefix.lower().replace(' ', '_')}/")
     else:
         print(f"\n✅ No sanity check failures!")
+
+    # Print evaluation failures summary
+    if eval_failures_by_model:
+        print(f"\n⚠️ Evaluation Failures Summary:")
+        for model, count in eval_failures_by_model.items():
+            print(f"   {model}: {count} evaluation failures")
+        total_eval_failures = sum(eval_failures_by_model.values())
+        print(f"   Total evaluation failures: {total_eval_failures}")
+    else:
+        print(f"\n✅ No evaluation failures!")
+
+    # Print model success statistics
+    if model_success_stats:
+        print(f"\n📊 Model Success Statistics:")
+        # Sort by success rate (highest first)
+        sorted_models = sorted(model_success_stats.items(), 
+                              key=lambda x: x[1].get('success_rate', 0), reverse=True)
+        
+        for model, stats in sorted_models:
+            success_rate = stats.get('success_rate', 0)
+            successful_runs = stats.get('successful_runs', 0)
+            total_attempted = stats.get('total_tasks_attempted', 0)
+            sanity_failures = stats.get('sanity_check_failures', 0)
+            eval_failures = stats.get('eval_failures', 0)
+            
+            status_emoji = "✅" if success_rate >= 90 else "⚠️" if success_rate >= 70 else "❌"
+            
+            print(f"   {status_emoji} {model}: {success_rate:.1f}% success ({successful_runs}/{total_attempted} runs)")
+            if sanity_failures > 0 or eval_failures > 0:
+                print(f"      └─ Failures: {sanity_failures} sanity, {eval_failures} eval")
 
     collection_name = (
         f"{collection_name_prefix} Collection ({'Dry Run' if dry_run else 'Full Run'})"
     )
 
-    return agent_runs, collection_name
+    # Generate PDF report if requested
+    report_path = None
+    if generate_report:
+        try:
+            from report_generator import generate_benchmark_report
+            
+            processing_summary = {
+                "total_files_processed": len(files_to_process),
+                "total_runs_processed": len(agent_runs),
+                "dry_run_mode": dry_run,
+                "max_files_limit": max_files if dry_run else "No limit",
+                "max_runs_per_model_limit": max_runs_per_model if dry_run else "No limit",
+                "model_success_stats": model_success_stats
+            }
+            
+            report_path = generate_benchmark_report(
+                benchmark_name=collection_name_prefix,
+                sanity_check_failures=failed_sanity_checks_by_model,
+                eval_failures=eval_failures_by_model,
+                total_files_processed=len(files_to_process),
+                total_runs_processed=len(agent_runs),
+                processing_summary=processing_summary
+            )
+            
+            print(f"\n📄 PDF Report generated: {report_path}")
+            
+        except ImportError:
+            print(f"\n⚠️ Could not generate PDF report - reportlab not available")
+        except Exception as e:
+            print(f"\n⚠️ Error generating PDF report: {e}")
+
+    return agent_runs, collection_name, report_path
