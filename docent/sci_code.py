@@ -93,11 +93,11 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     if args.agent_type == "specialist":
-        directory = "/Users/saitejautpala/work/hal_explore/hal_traces/sci_code_data"
+        directory = os.path.join(os.getcwd(), "hal_traces", "sci_code_data")
         file_pattern = SCICODE_SPECIALIST_PATTERN
         collection_prefix = "SciCode-Specialist"
     else:
-        directory = "/Users/saitejautpala/work/hal_explore/hal_traces/sci_code_data"
+        directory = os.path.join(os.getcwd(), "hal_traces", "sci_code_data")
         file_pattern = SCICODE_GENERALIST_PATTERN
         collection_prefix = "SciCode-Generalist"
 

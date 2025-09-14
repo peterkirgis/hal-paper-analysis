@@ -116,12 +116,12 @@ if __name__ == "__main__":
     args = parser.parse_args()
     
     if args.agent_type == "specialist":
-        directory = "/Users/saitejautpala/work/hal_explore/hal_traces/tau_bench_data"
+        directory = os.path.join(os.getcwd(), "hal_traces", "tau_bench_data")
         file_pattern = TAUBENCH_SPECIALIST_PATTERN
         collection_prefix = "TauBench-Specialist"
         system_prompt_prefix = "# Airline Agent Policy\n\nThe current time"
     else:
-        directory = "/Users/saitejautpala/work/hal_explore/hal_traces/tau_bench_data"
+        directory = os.path.join(os.getcwd(), "hal_traces", "tau_bench_data")
         file_pattern = TAUBENCH_GENERALIST_PATTERN
         collection_prefix = "TauBench-Generalist"
         system_prompt_prefix = "You are an expert assistant who can solve any task using code blobs"

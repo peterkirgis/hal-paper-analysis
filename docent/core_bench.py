@@ -117,11 +117,11 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     if args.agent_type == "specialist":
-        directory = "/Users/saitejautpala/work/hal_explore/hal_traces/core_bench_data"
+        directory = os.path.join(os.getcwd(), "hal_traces", "core_bench_data")
         file_pattern = COREBENCH_SPECIALIST_PATTERN
         collection_prefix = "CoreBench-Specialist"
     else:
-        directory = "/Users/saitejautpala/work/hal_explore/hal_traces/core_bench_data"
+        directory = os.path.join(os.getcwd(), "hal_traces", "core_bench_data")
         file_pattern = COREBENCH_GENERALIST_PATTERN
         collection_prefix = "CoreBench-Generalist"
 
