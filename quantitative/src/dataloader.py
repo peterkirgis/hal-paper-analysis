@@ -335,13 +335,13 @@ def load_paper_df():
 
     # Filter to a subset of models by name
     model_subset = [
-        'Claude Opus 4.1', 'Claude Opus 4.1 High', 'Claude-3.7 Sonnet',
-       'Claude-3.7 Sonnet High', 'DeepSeek R1', 'DeepSeek V3', 'GPT-4.1',
+        'Claude Opus 4.1', 'Claude Opus 4.1 High', 'Claude Sonnet 4', 'Claude Sonnet 4 High', 
+        'Claude-3.7 Sonnet', 'Claude-3.7 Sonnet High', 'DeepSeek R1', 'DeepSeek V3', 'GPT-4.1',
        'GPT-5 Medium', 'Gemini 2.0 Flash', 'o3 Medium', 'o4-mini High',
        'o4-mini Low'
     ]
 
-    model_subset_df = df[df['model'].isin(model_subset)]
+    model_subset_df = df[df['model'].isin(model_subset)].copy()
 
     # Import DEFAULT_PRICING from the hal-frontend db.py
     import sys
@@ -359,6 +359,8 @@ def load_paper_df():
         'o4-mini Low': 'o4-mini Low (April 2025)',
         'Claude-3.7 Sonnet': 'Claude-3.7 Sonnet (February 2025)',
         'Claude-3.7 Sonnet High': 'Claude-3.7 Sonnet High (February 2025)',
+        'Claude Sonnet 4': 'Claude Sonnet 4 (May 2025)',
+        'Claude Sonnet 4 High': 'Claude Sonnet 4 High (May 2025)',
         'Claude Opus 4.1': 'Claude Opus 4.1 (August 2025)',
         'Claude Opus 4.1 High': 'Claude Opus 4.1 High (August 2025)',
         'DeepSeek R1': 'DeepSeek R1',
@@ -397,6 +399,18 @@ def load_paper_df():
                 print(f"No token data available for {model_name}")
         else:
             print(f"No pricing data found for {model_name} (looked for key: {pricing_key})")
+    
+    # Remove all rows where model contains "Sonnet 4" where benchmark is not "online_mind2web"
+    model_subset_df = model_subset_df[~((model_subset_df['model'].str.contains('Sonnet 4')) & (model_subset_df['benchmark_name'] != 'online_mind2web'))]
+
+    # Remove run_id == corebench_hard_hal_generalist_agentdeepseekr1_1757615687
+    model_subset_df = model_subset_df[model_subset_df['run_id'] != 'corebench_hard_hal_generalist_agentdeepseekr1_1757615687']
+
+    # Shorten agent name of "USACO Episodic + Semantic" to "USACO Episodic"
+    # model_subset_df.loc[model_subset_df['agent_scaffold'] == 'USACO Episodic + Semantic', 'agent_scaffold'] = 'USACO Episodic'
+
+    # Remove all runs where agent scaffold contains "TAU-bench Few Shot"
+    model_subset_df = model_subset_df[~model_subset_df['agent_scaffold'].str.contains('TAU-bench Few Shot')]
 
     # Remove generalist agent and secondary agent scaffolds
     model_df = model_subset_df[~model_subset_df['agent_scaffold'].str.contains('Generalist|Zero|SeeAct')]
@@ -411,7 +425,7 @@ def load_paper_df():
     agent_df = pd.concat([task_df_compare, generalist_df])
 
     # Create master dataframe including generalist agent and seeact
-    all_task_df = df[~df['agent_scaffold'].str.contains('Generalist|Zero')]
+    all_task_df = model_subset_df[~model_subset_df['agent_scaffold'].str.contains('Generalist|Zero')]
 
     benchmark_df = pd.concat([all_task_df, generalist_df])
 
