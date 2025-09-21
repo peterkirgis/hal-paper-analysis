@@ -9,6 +9,8 @@ import ast
 import json
 import os
 import re
+import shutil
+import tempfile
 from datetime import datetime
 from typing import Any, Dict, List, Tuple
 
@@ -381,11 +383,193 @@ class BaseBenchmarkMetadata(BaseAgentRunMetadata):
     )
 
 
+def download_missing_files(
+    directory: str,
+    file_pattern: str,
+    collection_name_prefix: str,
+    force_download: bool = False,
+) -> List[str]:
+    """
+    Download benchmark files from Hugging Face repository.
+    
+    Args:
+        directory (str): Local directory where files should be stored
+        file_pattern (str): Regex pattern to match files
+        collection_name_prefix (str): Prefix for determining the benchmark type
+        force_download (bool): If True, download files even if they already exist locally
+        
+    Returns:
+        List[str]: List of file paths that were downloaded (for cleanup)
+    """
+    try:
+        from download import hf_download_decrypt_to_tempfile
+    except ImportError:
+        print("❌ Cannot import download module. Make sure download.py is available.")
+        return []
+    
+    # Ensure directory exists
+    os.makedirs(directory, exist_ok=True)
+    
+    # Map collection prefixes to HF repo paths and patterns
+    # Files are directly in the root directory, not in subdirectories
+    benchmark_mapping = {
+        "CoreBench-Generalist": ("", r"corebench_hard_hal_generalist_agent(.+?)_\d+_UPLOAD\.zip$"),
+        "CoreBench-Specialist": ("", r"corebench_hard_coreagent_\d+_UPLOAD\.zip$"),
+        "SciCode-Generalist": ("", r"scicode_hal_generalist_agent(.+?)_\d+_UPLOAD\.zip$"),
+        "SciCode-Specialist": ("", r"scicode_scicode_(.+?)_agent(.+?)_\d+_UPLOAD\.zip$"),
+        "TauBench-Generalist": ("", r"taubench_airline_hal_generalist_(.+?)_\d+_UPLOAD\.zip$"),
+        "TauBench-Specialist": ("", r"taubench_airline_taubench_fewshot_(.+?)_\d+_UPLOAD\.zip$"),
+        "AssistantBench-Generalist": ("", r"assistantbench_hal_generalist_agent(.+?)_\d+_UPLOAD\.zip$"),
+        "AssistantBench-Specialist": ("", r"assistantbench_assistantbench_browser_agent(.+?)_\d+_UPLOAD\.zip$"),
+    }
+    
+    if collection_name_prefix not in benchmark_mapping:
+        print(f"❌ Unknown benchmark type: {collection_name_prefix}")
+        return []
+    
+    hf_subdir, zip_pattern = benchmark_mapping[collection_name_prefix]
+    
+    if force_download:
+        print(f"📥 Force downloading files for {collection_name_prefix}...")
+    else:
+        print(f"📥 Downloading missing files for {collection_name_prefix}...")
+    
+    try:
+        from huggingface_hub import HfFileSystem
+        
+        fs = HfFileSystem()
+        repo_path = "datasets/agent-evals/hal_traces@main"
+        hf_full_path = f"{repo_path}/{hf_subdir}" if hf_subdir else repo_path
+        
+        # List all files in the HF directory
+        try:
+            hf_files = fs.ls(hf_full_path, detail=False)
+            zip_files = [f for f in hf_files if re.search(zip_pattern, os.path.basename(f))]
+            
+            if not zip_files:
+                print(f"⚠️ No matching files found in HF repository for pattern: {zip_pattern}")
+                return []
+            
+            downloaded_files = []
+            downloaded_count = 0
+            for zip_file_path in zip_files:
+                zip_filename = os.path.basename(zip_file_path)
+                # Convert .zip to .json for local storage
+                json_filename = zip_filename.replace("_UPLOAD.zip", "_UPLOAD.json")
+                local_json_path = os.path.join(directory, json_filename)
+                
+                # Check if file already exists locally (skip only if not force downloading)
+                if os.path.exists(local_json_path) and not force_download:
+                    continue
+                
+                print(f"   📥 Downloading: {zip_filename}")
+                try:
+                    # Download and decrypt the file
+                    temp_json_path = hf_download_decrypt_to_tempfile(zip_filename, repo_id="agent-evals/hal_traces")
+                    
+                    # Read the decrypted JSON and reformat with proper indentation
+                    with open(temp_json_path, 'r', encoding='utf-8') as f:
+                        data = json.load(f)
+                    
+                    # Write with 4-space indentation
+                    with open(local_json_path, 'w', encoding='utf-8') as f:
+                        json.dump(data, f, indent=4, ensure_ascii=False)
+                    
+                    # Clean up the temporary file
+                    os.remove(temp_json_path)
+                    
+                    downloaded_files.append(local_json_path)
+                    downloaded_count += 1
+                    print(f"   ✅ Saved: {json_filename}")
+                    
+                except Exception as e:
+                    print(f"   ❌ Failed to download {zip_filename}: {e}")
+                    continue
+            
+            if downloaded_count > 0:
+                print(f"✅ Downloaded {downloaded_count} files to {directory}")
+            else:
+                print(f"ℹ️ All files already exist locally in {directory}")
+            
+            return downloaded_files
+                
+        except Exception as e:
+            print(f"❌ Error listing HF repository contents: {e}")
+            return []
+            
+    except ImportError:
+        print("❌ huggingface_hub not available. Cannot download files.")
+        return []
+    except Exception as e:
+        print(f"❌ Error during download: {e}")
+        return []
+
+
+def cleanup_downloaded_files(downloaded_files: List[str]) -> None:
+    """
+    Clean up downloaded files to save disk space.
+    
+    Args:
+        downloaded_files (List[str]): List of file paths to delete
+    """
+    if not downloaded_files:
+        return
+        
+    print(f"🧹 Cleaning up {len(downloaded_files)} downloaded files...")
+    cleaned_count = 0
+    
+    for file_path in downloaded_files:
+        try:
+            if os.path.exists(file_path):
+                os.remove(file_path)
+                cleaned_count += 1
+                print(f"   🗑️  Deleted: {os.path.basename(file_path)}")
+        except Exception as e:
+            print(f"   ⚠️ Failed to delete {file_path}: {e}")
+    
+    if cleaned_count > 0:
+        print(f"✅ Cleaned up {cleaned_count} files")
+
+
+def cleanup_temp_directory(temp_directory: str) -> None:
+    """
+    Clean up entire temporary directory to save disk space.
+    
+    Args:
+        temp_directory (str): Path to temporary directory to delete
+    """
+    if not temp_directory or not os.path.exists(temp_directory):
+        return
+        
+    print(f"🧹 Cleaning up temporary directory: {temp_directory}")
+    
+    try:
+        shutil.rmtree(temp_directory)
+        print(f"✅ Successfully removed temporary directory: {temp_directory}")
+    except Exception as e:
+        print(f"⚠️ Failed to remove temporary directory {temp_directory}: {e}")
+        # Fallback: try to remove individual files
+        try:
+            for root, dirs, files in os.walk(temp_directory):
+                for file in files:
+                    file_path = os.path.join(root, file)
+                    try:
+                        os.remove(file_path)
+                    except Exception:
+                        pass
+            os.rmdir(temp_directory)
+            print(f"✅ Cleaned up temporary directory using fallback method")
+        except Exception as fallback_error:
+            print(f"❌ Failed to clean up temporary directory: {fallback_error}")
+
+
 def analyze_benchmark_files(
     directory: str,
     file_pattern: str,
     system_prompt_prefix: str = "You are an expert assistant who can solve any task using code blobs",
-) -> Dict[str, Dict[str, str]]:
+    download_if_missing: bool = False,
+    collection_name_prefix: str = None,
+) -> Tuple[Dict[str, Dict[str, str]], List[str]]:
     """
     Generic function to analyze benchmark files and extract model names from both file path and JSON content.
 
@@ -398,15 +582,19 @@ def analyze_benchmark_files(
         directory (str): Path to the directory containing benchmark JSON files
         file_pattern (str): Regex pattern to match files and extract model names
         system_prompt_prefix (str): The prefix that the system prompt text must start with
+        download_if_missing (bool): Whether to download files if directory is empty or missing
+        collection_name_prefix (str): Prefix for determining benchmark type for downloads
 
     Returns:
-        Dict[str, Dict[str, str]]: Dictionary mapping file paths to model name information:
-        {
-            'file_path': {
-                'model_name_from_file_path': str,
-                'model_name_from_json_content': str
-            }
-        }
+        Tuple[Dict[str, Dict[str, str]], List[str]]: 
+            - Dictionary mapping file paths to model name information:
+              {
+                  'file_path': {
+                      'model_name_from_file_path': str,
+                      'model_name_from_json_content': str
+                  }
+              }
+            - List of downloaded file paths (for cleanup)
 
     Raises:
         ValueError: If model names are inconsistent within a file or file pattern doesn't match
@@ -414,10 +602,21 @@ def analyze_benchmark_files(
         json.JSONDecodeError: If a file contains invalid JSON
     """
     if not os.path.exists(directory):
-        raise OSError(f"Directory does not exist: {directory}")
+        if download_if_missing and collection_name_prefix:
+            print(f"📁 Directory {directory} does not exist, creating it...")
+            os.makedirs(directory, exist_ok=True)
+        else:
+            raise OSError(f"Directory does not exist: {directory}")
 
     if not os.path.isdir(directory):
         raise OSError(f"Path is not a directory: {directory}")
+
+    # Download files if requested
+    downloaded_files = []
+    if download_if_missing and collection_name_prefix:
+        # Always download when download_if_missing is True (since we're using temp directory)
+        print(f"📁 Download requested, downloading files for {collection_name_prefix}...")
+        downloaded_files = download_missing_files(directory, file_pattern, collection_name_prefix, force_download=True)
 
     results = {}
 
@@ -496,7 +695,7 @@ def analyze_benchmark_files(
             "model_name_from_json_content": model_name_from_json,
         }
 
-    return results
+    return results, downloaded_files
 
 
 def default_task_processor(
@@ -559,6 +758,7 @@ def process_benchmark_files(
     max_runs_per_model: int = 5,
     task_processor=None,
     generate_report: bool = True,
+    download_if_missing: bool = False,
 ):
     """
     Generic function to process benchmark files and return agent runs.
@@ -574,16 +774,28 @@ def process_benchmark_files(
         system_prompt_prefix (str): System prompt prefix to filter on
         task_processor: Optional function to process tasks and return agent runs
         generate_report (bool): Whether to generate a PDF report of the results
+        download_if_missing (bool): Whether to download files from HF if not found locally
 
     Returns:
         Tuple[List[AgentRun], str, str]: List of agent runs, collection name, and report path (if generated)
     """
     from docent.data_models import AgentRun
 
+    # Create timestamped temporary directory if downloading
+    temp_directory = None
+    original_directory = directory
+    
+    if download_if_missing:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        temp_directory = f"hal_traces_{timestamp}"
+        print(f"📁 Creating temporary directory: {temp_directory}")
+        os.makedirs(temp_directory, exist_ok=True)
+        directory = temp_directory
+
     # Step 1: Analyze all files to get model mappings
     print(f"🔍 Analyzing {collection_name_prefix} files...")
-    file_model_mappings = analyze_benchmark_files(
-        directory, file_pattern, system_prompt_prefix
+    file_model_mappings, downloaded_files = analyze_benchmark_files(
+        directory, file_pattern, system_prompt_prefix, download_if_missing, collection_name_prefix
     )
 
     print(f"📁 Found {len(file_model_mappings)} {collection_name_prefix} files")
@@ -754,5 +966,9 @@ def process_benchmark_files(
             print(f"\n⚠️ Could not generate PDF report - reportlab not available")
         except Exception as e:
             print(f"\n⚠️ Error generating PDF report: {e}")
+
+    # Clean up temporary directory if it was created
+    if download_if_missing and temp_directory:
+        cleanup_temp_directory(temp_directory)
 
     return agent_runs, collection_name, report_path

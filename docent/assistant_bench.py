@@ -154,6 +154,11 @@ if __name__ == "__main__":
         default="generalist",
         help="Type of agent data to process (generalist or specialist)",
     )
+    parser.add_argument(
+        "--download",
+        action="store_true",
+        help="Download files from Hugging Face (will overwrite existing files)",
+    )
     args = parser.parse_args()
 
     if args.agent_type == "specialist":
@@ -179,6 +184,7 @@ if __name__ == "__main__":
         max_files=3,
         max_runs_per_model=3,
         task_processor=assistant_bench_task_processor,
+        download_if_missing=args.download,
     )
 
     if len(agent_runs) == 0:
