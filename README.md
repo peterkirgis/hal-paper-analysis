@@ -7,15 +7,13 @@ Analysis tools for the Holistic Agent Leaderboard (HAL) dataset, split into qual
 ```
 hal-paper-analysis/
 ├── qualitative/          # Data extraction and conversation analysis
-│   ├── src/             # Pipeline for processing HAL data
-│   ├── main.py          # Main extraction pipeline
-│   ├── notebooks.py     # Testing notebooks
-│   └── outputs/         # Generated JSON files
+│   ├── full_pipeline.py # Complete extraction pipeline
+│   └── results/         # Analysis notebooks and outputs
 └── quantitative/        # Statistical analysis and visualization
-    ├── src/             # Data loading and analysis tools
-    ├── notebooks/       # Analysis notebooks
-    └── plots/           # Generated visualizations
-
+    ├── src/             # Utility modules (dataloader, pareto, plotting)
+    ├── scripts/         # Standalone analysis scripts
+    ├── plots/           # Generated visualizations
+    └── hal-frontend/    # HAL data submodule
 ```
 
 ## Getting Started
@@ -31,28 +29,35 @@ pip install python-dotenv docent huggingface_hub cryptography
 
 **Usage:**
 ```bash
-python main.py  # Processes benchmark data and uploads to Docent
+python full_pipeline.py  # Processes benchmark data and uploads to Docent
 ```
 
 See `qualitative/README.md` for detailed configuration options.
 
-### Quantitative Analysis  
+### Quantitative Analysis
 Creates statistical analysis and visualizations from HAL benchmark results.
 
 **Setup:**
 ```bash
 cd quantitative
 git submodule add https://github.com/fsndzomga/hal-frontend.git hal-frontend
-pip install pandas numpy matplotlib seaborn scikit-learn jupyter
+pip install pandas numpy matplotlib seaborn scikit-learn
 ```
 
 **Usage:**
-```python
-from src.dataloader import load_most_recent_df
-df = load_most_recent_df()  # Load benchmark results
+```bash
+python scripts/pareto_accuracy_cost.py      # Cost vs accuracy analysis
+python scripts/reasoning_comparisons.py     # Reasoning level comparisons
+python scripts/agent_comparisons.py         # Agent scaffold comparisons
 ```
 
-See `quantitative/README.md` for visualization and analysis examples.
+Or import utilities:
+```python
+from src.dataloader import load_paper_df
+model_df, agent_df, benchmark_df = load_paper_df()
+```
+
+See `quantitative/README.md` for detailed script descriptions.
 
 ## Requirements
 

@@ -2,27 +2,29 @@
 
 This section contains the data extraction and processing pipeline for qualitative analysis of HAL paper benchmarks.
 
-## Pipeline Components
+## Structure
 
-- **src/docent_pipeline/**: Data extraction and upload pipeline
-  - `download_utils.py`: Download and parse benchmark data from HuggingFace
-  - `processing_utils.py`: Convert data to docent format
-  - `upload_utils.py`: Upload processed data to docent
-  - `config.py`: Configuration settings
-
-- **main.py**: Main pipeline orchestrator
-- **notebooks/**: Jupyter notebooks for analysis
-- **testing/**: Test scripts and utilities
-- **outputs/**: Generated JSON files and results
+```
+qualitative/
+├── full_pipeline.py         # Complete extraction and analysis pipeline
+├── main.py                  # Main pipeline orchestrator
+├── hal_pipeline_results.json # Extracted conversation data
+└── results/                 # Analysis notebooks and outputs
+    ├── docent_rubric_analysis.ipynb  # Rubric-based analysis
+    └── docent_figures.ipynb         # Visualization notebooks
+```
 
 ## Usage
 
-From the qualitative directory:
-
+**Run extraction pipeline:**
 ```bash
 cd qualitative
-python main.py
+python main.py              # Basic pipeline
+python full_pipeline.py     # Complete extraction with all features
 ```
+
+**Analyze results:**
+Open notebooks in `results/` directory to analyze extracted conversations and generate figures.
 
 ## Features
 
@@ -30,4 +32,5 @@ python main.py
 - Handles multiple model types and benchmarks (AssistantBench, TauBench, SciCode, etc.)
 - Deduplicates messages and handles role assignment for multi-model scenarios
 - Extracts metadata including reasoning effort parameters
-- Uploads to docent for analysis
+- Generates structured JSON output for further analysis
+- Provides analysis notebooks for rubric-based evaluation and visualization
