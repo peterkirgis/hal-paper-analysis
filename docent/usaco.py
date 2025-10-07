@@ -30,6 +30,7 @@ def hal_usaco_to_docent_usaco(
     model_name: str,
     eval_results_data: dict[str, Any],
     config_data: dict[str, Any] = None,
+    verbose: bool = False,
 ) -> AgentRun:
     """
     Convert a HAL USACO log entry into a Docent USACO AgentRun.
@@ -46,13 +47,23 @@ def hal_usaco_to_docent_usaco(
     """
     assert logging_data["inputs"]["model"] == model_name
     task_id = logging_data["weave_task_id"]
+    
+    if verbose:
+        print(f"      🔍 [VERBOSE] Converting task_id: {task_id}")
+        print(f"      🔍 [VERBOSE] Model: {model_name}")
 
     trajectories = logging_data["inputs"]["messages"]
     messages = parse_messages_to_chat_messages(trajectories)
+    
+    if verbose:
+        print(f"      🔍 [VERBOSE] Parsed {len(messages)} messages from trajectories")
 
     # Extract individual task evaluation results from rdict
     rdict = eval_results_data.get("rdict", {})
     task_results = rdict.get(task_id, [])
+    
+    if verbose:
+        print(f"      🔍 [VERBOSE] Found {len(task_results)} result attempts for this task")
     
     # Calculate task success based on test results
     # Each problem has multiple test cases
@@ -85,6 +96,9 @@ def hal_usaco_to_docent_usaco(
     # Calculate test pass rate for this task
     test_pass_rate = passed_tests / total_tests if total_tests > 0 else 0.0
     
+    if verbose:
+        print(f"      🔍 [VERBOSE] Test results: {passed_tests}/{total_tests} passed (success={task_success})")
+    
     # Extract overall metrics
     overall_accuracy = eval_results_data.get("accuracy", 0.0)
     successful_tasks = eval_results_data.get("successful_tasks", [])
@@ -97,6 +111,9 @@ def hal_usaco_to_docent_usaco(
     problem_number = parts[0] if len(parts) > 0 else ""
     difficulty = parts[1] if len(parts) > 1 else "unknown"
     problem_name = parts[2] if len(parts) > 2 else task_id
+    
+    if verbose:
+        print(f"      🔍 [VERBOSE] Problem: {problem_number}, Difficulty: {difficulty}, Name: {problem_name}")
     
     # Calculate difficulty-specific metrics
     difficulty_counts = {"bronze": 0, "silver": 0, "gold": 0, "platinum": 0}
@@ -193,7 +210,7 @@ def hal_usaco_to_docent_usaco(
 
 
 def usaco_task_processor(
-    task_logs_dict, data, model_name, conversion_function, max_runs
+    task_logs_dict, data, model_name, conversion_function, max_runs, verbose=False
 ):
     """
     Custom task processor for USACO that handles its evaluation structure.
@@ -219,6 +236,10 @@ def usaco_task_processor(
     # Extract config for all tasks in this file
     config_data = data.get("config", {})
     
+    if verbose:
+        print(f"   🔍 [VERBOSE] Processing {len(task_logs_dict)} task logs")
+        print(f"   🔍 [VERBOSE] Max runs to process: {max_runs}")
+    
     # Extract evaluation results
     results_data = data.get("results", {})
     raw_eval_results = data.get("raw_eval_results", {})
@@ -232,12 +253,17 @@ def usaco_task_processor(
     if not rdict:
         print(f"   ❌ No rdict data found in raw_eval_results, skipping file")
         return agent_runs
+    
+    if verbose:
+        print(f"   🔍 [VERBOSE] Found rdict with {len(rdict)} task results")
 
     # Combine results and raw_eval_results for the conversion function
     combined_eval_data = {**raw_eval_results, **results_data}
 
     for task_id, log_entry in task_logs_dict.items():
         if processed >= max_runs:
+            if verbose:
+                print(f"   🔍 [VERBOSE] Reached max runs limit ({max_runs}), stopping")
             break
 
         # Check if we have test results for this task
@@ -246,15 +272,27 @@ def usaco_task_processor(
             continue
 
         try:
+            if verbose:
+                print(f"   🔍 [VERBOSE] Processing task {processed+1}/{max_runs}: {task_id}")
+            
             # Pass the combined evaluation data
             agent_run = conversion_function(
-                log_entry, model_name, combined_eval_data, config_data
+                log_entry, model_name, combined_eval_data, config_data, verbose
             )
             agent_runs.append(agent_run)
             processed += 1
+            
+            if verbose:
+                print(f"   🔍 [VERBOSE] ✓ Successfully processed task {task_id}")
         except Exception as e:
             print(f"   ❌ Error processing task_id={task_id}: {e}")
+            if verbose:
+                import traceback
+                print(f"   🔍 [VERBOSE] Traceback: {traceback.format_exc()}")
             continue
+
+    if verbose:
+        print(f"   🔍 [VERBOSE] Completed processing: {len(agent_runs)} agent runs created")
 
     return agent_runs
 
@@ -281,7 +319,16 @@ if __name__ == "__main__":
         action="store_true",
         help="Download files from Hugging Face (will overwrite existing files)",
     )
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Enable verbose logging for debugging",
+    )
     args = parser.parse_args()
+    
+    if args.verbose:
+        print("🔍 [VERBOSE] Verbose logging enabled")
+        print(f"🔍 [VERBOSE] Arguments: dry_run={args.dry_run}, agent_type={args.agent_type}, download={args.download}")
 
     if args.agent_type == "specialist":
         directory = os.path.join(os.getcwd(), "hal_traces", "uscao_data")
@@ -298,6 +345,12 @@ if __name__ == "__main__":
             "You are an expert assistant who can solve any task using code blobs"
         )
     
+    if args.verbose:
+        print(f"🔍 [VERBOSE] Configuration:")
+        print(f"🔍 [VERBOSE]   Directory: {directory}")
+        print(f"🔍 [VERBOSE]   Pattern: {file_pattern}")
+        print(f"🔍 [VERBOSE]   Collection: {collection_prefix}")
+    
     agent_runs, collection_name, report_path = process_benchmark_files(
         directory=directory,
         file_pattern=file_pattern,
@@ -309,6 +362,7 @@ if __name__ == "__main__":
         max_runs_per_model=3,
         task_processor=usaco_task_processor,
         download_if_missing=args.download,
+        verbose=args.verbose,
     )
 
     if len(agent_runs) == 0:

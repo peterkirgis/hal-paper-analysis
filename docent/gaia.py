@@ -29,6 +29,7 @@ def hal_gaia_to_docent_gaia(
     model_name: str,
     eval_results_data: dict[str, Any],
     config_data: dict[str, Any] = None,
+    verbose: bool = False,
 ) -> AgentRun:
     """
     Convert a HAL GAIA log entry into a Docent GAIA AgentRun.
@@ -45,9 +46,16 @@ def hal_gaia_to_docent_gaia(
     """
     assert logging_data["inputs"]["model"] == model_name
     task_id = logging_data["weave_task_id"]
+    
+    if verbose:
+        print(f"      🔍 [VERBOSE] Converting task_id: {task_id}")
+        print(f"      🔍 [VERBOSE] Model: {model_name}")
 
     trajectories = logging_data["inputs"]["messages"]
     messages = parse_messages_to_chat_messages(trajectories)
+    
+    if verbose:
+        print(f"      🔍 [VERBOSE] Parsed {len(messages)} messages from trajectories")
 
     # Extract individual task evaluation result
     task_eval_result = eval_results_data.get(task_id, {})
@@ -147,7 +155,7 @@ def hal_gaia_to_docent_gaia(
 
 
 def gaia_task_processor(
-    task_logs_dict, data, model_name, conversion_function, max_runs
+    task_logs_dict, data, model_name, conversion_function, max_runs, verbose=False
 ):
     """
     Custom task processor for GAIA that handles per-task evaluation results.
@@ -172,6 +180,10 @@ def gaia_task_processor(
     # Extract config for all tasks in this file
     config_data = data.get("config", {})
     
+    if verbose:
+        print(f"   🔍 [VERBOSE] Processing {len(task_logs_dict)} task logs")
+        print(f"   🔍 [VERBOSE] Max runs to process: {max_runs}")
+    
     # Extract evaluation results
     raw_eval_results = data.get("raw_eval_results", {})
     
@@ -181,19 +193,33 @@ def gaia_task_processor(
 
     for task_id, log_entry in task_logs_dict.items():
         if processed >= max_runs:
+            if verbose:
+                print(f"   🔍 [VERBOSE] Reached max runs limit ({max_runs}), stopping")
             break
 
         try:
+            if verbose:
+                print(f"   🔍 [VERBOSE] Processing task {processed+1}/{max_runs}: {task_id}")
+            
             # For GAIA, we pass the entire raw_eval_results as eval_results_data
             # The conversion function will extract the specific task data
             agent_run = conversion_function(
-                log_entry, model_name, raw_eval_results, config_data
+                log_entry, model_name, raw_eval_results, config_data, verbose
             )
             agent_runs.append(agent_run)
             processed += 1
+            
+            if verbose:
+                print(f"   🔍 [VERBOSE] ✓ Successfully processed task {task_id}")
         except Exception as e:
             print(f"   ❌ Error processing task_id={task_id}: {e}")
+            if verbose:
+                import traceback
+                print(f"   🔍 [VERBOSE] Traceback: {traceback.format_exc()}")
             continue
+
+    if verbose:
+        print(f"   🔍 [VERBOSE] Completed processing: {len(agent_runs)} agent runs created")
 
     return agent_runs
 
@@ -220,14 +246,23 @@ if __name__ == "__main__":
         action="store_true",
         help="Download files from Hugging Face (will overwrite existing files)",
     )
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Enable verbose logging for debugging",
+    )
     args = parser.parse_args()
+    
+    if args.verbose:
+        print("🔍 [VERBOSE] Verbose logging enabled")
+        print(f"🔍 [VERBOSE] Arguments: dry_run={args.dry_run}, agent_type={args.agent_type}, download={args.download}")
 
     if args.agent_type == "specialist":
         directory = os.path.join(os.getcwd(), "hal_traces", "gaia_data")
         file_pattern = GAIA_SPECIALIST_PATTERN
         collection_prefix = "GAIA-Specialist"
         system_prompt_prefix = (
-            "You are a specialist GAIA agent"
+            "You are an expert assistant who can solve any task using tool calls."
         )
     else:
         directory = os.path.join(os.getcwd(), "hal_traces", "gaia_data")
@@ -236,6 +271,12 @@ if __name__ == "__main__":
         system_prompt_prefix = (
             "You are an expert assistant who can solve any task using code blobs"
         )
+    
+    if args.verbose:
+        print(f"🔍 [VERBOSE] Configuration:")
+        print(f"🔍 [VERBOSE]   Directory: {directory}")
+        print(f"🔍 [VERBOSE]   Pattern: {file_pattern}")
+        print(f"🔍 [VERBOSE]   Collection: {collection_prefix}")
     
     agent_runs, collection_name, report_path = process_benchmark_files(
         directory=directory,
@@ -248,6 +289,7 @@ if __name__ == "__main__":
         max_runs_per_model=3,
         task_processor=gaia_task_processor,
         download_if_missing=args.download,
+        verbose=args.verbose,
     )
 
     if len(agent_runs) == 0:

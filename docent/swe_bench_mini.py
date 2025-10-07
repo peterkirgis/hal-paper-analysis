@@ -30,6 +30,7 @@ def hal_swe_bench_mini_to_docent_swe_bench_mini(
     model_name: str,
     eval_results_data: dict[str, Any],
     config_data: dict[str, Any] = None,
+    verbose: bool = False,
 ) -> AgentRun:
     """
     Convert a HAL SWE-Bench Mini log entry into a Docent SWE-Bench Mini AgentRun.
@@ -111,7 +112,7 @@ def hal_swe_bench_mini_to_docent_swe_bench_mini(
 
 
 def swe_bench_mini_task_processor(
-    task_logs_dict, data, model_name, conversion_function, max_runs
+    task_logs_dict, data, model_name, conversion_function, max_runs, verbose=False
 ):
     """
     Custom task processor for SWE-Bench Mini that handles aggregate evaluation results.
@@ -185,14 +186,23 @@ if __name__ == "__main__":
         action="store_true",
         help="Download files from Hugging Face (will overwrite existing files)",
     )
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Enable verbose logging for debugging",
+    )
     args = parser.parse_args()
+    
+    if args.verbose:
+        print("🔍 [VERBOSE] Verbose logging enabled")
+        print(f"🔍 [VERBOSE] Arguments: dry_run={args.dry_run}, agent_type={args.agent_type}, download={args.download}")
 
     if args.agent_type == "specialist":
         directory = os.path.join(os.getcwd(), "hal_traces", "swe_bench_mini_data")
         file_pattern = SWEBENCH_SPECIALIST_PATTERN
         collection_prefix = "SWEBenchMini-Specialist"
         system_prompt_prefix = (
-            "You are a specialist SWE-Bench agent"
+            "You are a helpful assistant that can interact with a computer to solve tasks."
         )
     else:
         directory = os.path.join(os.getcwd(), "hal_traces", "swe_bench_mini_data")
@@ -201,6 +211,12 @@ if __name__ == "__main__":
         system_prompt_prefix = (
             "You are an expert assistant who can solve any task using code blobs"
         )
+    
+    if args.verbose:
+        print(f"🔍 [VERBOSE] Configuration:")
+        print(f"🔍 [VERBOSE]   Directory: {directory}")
+        print(f"🔍 [VERBOSE]   Pattern: {file_pattern}")
+        print(f"🔍 [VERBOSE]   Collection: {collection_prefix}")
     
     agent_runs, collection_name, report_path = process_benchmark_files(
         directory=directory,
@@ -213,6 +229,7 @@ if __name__ == "__main__":
         max_runs_per_model=3,
         task_processor=swe_bench_mini_task_processor,
         download_if_missing=args.download,
+        verbose=args.verbose,
     )
 
     if len(agent_runs) == 0:
