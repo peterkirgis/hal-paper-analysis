@@ -11,6 +11,7 @@ import os
 import re
 import shutil
 import tempfile
+import warnings
 from datetime import datetime
 from typing import Any, Dict, List, Tuple
 
@@ -95,82 +96,154 @@ def save_failed_sanity_check_logs(
         print(f"   ⚠️ Failed to save logs to {filepath}: {e}")
 
 
-def extract_task_ids(filtered_logs: list, task_id_key: str = "weave_task_id") -> list:
+def extract_task_ids(filtered_logs: list, task_id_key: str = "weave_task_id", verbose: bool = False) -> list:
     """
     Extract sorted unique task IDs from filtered logs.
 
     Args:
         filtered_logs (list): List of filtered log entries.
         task_id_key (str, optional): The key used to extract task IDs. Defaults to "weave_task_id".
+        verbose (bool, optional): Enable verbose logging. Defaults to False.
 
     Returns:
         list: A sorted list of unique task IDs.
     """
-    return sorted(
+    if verbose:
+        print(f"      🔍 [VERBOSE] extract_task_ids starting")
+        print(f"      🔍 [VERBOSE]   Processing {len(filtered_logs)} filtered logs")
+        print(f"      🔍 [VERBOSE]   Using task_id_key: {task_id_key}")
+    
+    task_ids = sorted(
         set(entry.get(task_id_key) for entry in filtered_logs if entry.get(task_id_key))
     )
+    
+    if verbose:
+        print(f"      🔍 [VERBOSE] extract_task_ids completed: {len(task_ids)} unique task IDs found")
+    
+    return task_ids
 
 
 def normalize_message_for_comparison(message: dict) -> dict:
     """
-    Normalize a message dict by removing None values and standardizing keys.
-    This ensures consistent comparison between messages that may have None values
-    vs missing keys for fields like tool_calls, function_call, etc.
+    Normalize a message dict by returning only role, content, and tool_call_id (if present).
+    For content that is a list of dicts, only keep 'type' and 'text' fields.
+    This ensures consistent comparison between messages by focusing on essential fields.
 
     Args:
         message (dict): The message to normalize
 
     Returns:
-        dict: Normalized message with None values removed
+        dict: Normalized message with only role, content, and tool_call_id (if present)
     """
     normalized = {}
-    for key, value in message.items():
-        if value is not None:
-            normalized[key] = value
+    
+    # Always include role
+    if 'role' in message:
+        normalized['role'] = message['role']
+    
+    # Normalize content
+    if 'content' in message:
+        content = message['content']
+        # If content is a list of dicts, normalize each dict to only include 'type' and 'text'
+        if isinstance(content, list):
+            normalized_content = []
+            for item in content:
+                if isinstance(item, dict):
+                    normalized_item = {}
+                    if 'type' in item:
+                        normalized_item['type'] = item['type']
+                    if 'text' in item:
+                        normalized_item['text'] = item['text']
+                    normalized_content.append(normalized_item)
+                else:
+                    # If item is not a dict, keep it as is
+                    normalized_content.append(item)
+            normalized['content'] = normalized_content
+        else:
+            # If content is not a list, keep it as is
+            normalized['content'] = content
+    
+    # Include tool_call_id only if present
+    if 'tool_call_id' in message and message['tool_call_id'] is not None:
+        normalized['tool_call_id'] = message['tool_call_id']
+    
     return normalized
 
 
-def sanity_check(task_logs: list) -> bool:
+def sanity_check(task_logs: list, allow_multiple_versions: bool = True) -> bool:
     """
     Check that the 0th (largest) log contains all smaller logs as ordered subsets.
-
+    
     Args:
         task_logs (list): List of logs for a given task_id.
+        allow_multiple_versions (bool): If True, allows multiple different versions of the 
+            same size as long as at least one is a valid subset of the largest log. This 
+            handles cases where there are different conversation branches. Default is False.
 
     Returns:
         bool: True if the largest log captures all others, False otherwise.
     """
+    from collections import defaultdict
+    
     # Sort logs by number of messages (largest first)
     task_logs_sorted = sorted(
         task_logs, key=lambda x: len(x["inputs"]["messages"]), reverse=True
     )
     largest_log = task_logs_sorted[0]
     largest_size = len(largest_log["inputs"]["messages"])
-
+    msgs_large = largest_log["inputs"]["messages"]
+    
+    # Group logs by size
+    logs_by_size = defaultdict(list)
     for log in task_logs_sorted[1:]:
-        msgs_small = log["inputs"]["messages"]
-        msgs_large = largest_log["inputs"]["messages"]
-
-        # If logs have the same number of messages, check if they're identical
-        if len(msgs_small) == largest_size:
-            # Check if they're actually identical (same content)
-            for i, m in enumerate(msgs_small):
-                normalized_small = normalize_message_for_comparison(m)
-                normalized_large = normalize_message_for_comparison(msgs_large[i])
-                if normalized_small != normalized_large:
-                    return False  # Same size but different content - that's a violation
-            continue  # They're truly identical, skip to next
-
-        # If small log is somehow larger than largest, that's a violation
-        if len(msgs_small) > largest_size:
-            return False  # sanity violation
-
-        # Check if smaller log is a prefix of larger log
-        for i, m in enumerate(msgs_small):
-            normalized_small = normalize_message_for_comparison(m)
-            normalized_large = normalize_message_for_comparison(msgs_large[i])
-            if normalized_small != normalized_large:
-                return False  # mismatch
+        size = len(log["inputs"]["messages"])
+        logs_by_size[size].append(log)
+    
+    # Check each size group
+    for size, logs_of_size in logs_by_size.items():
+        # If logs have the same size as largest, they must all be identical to it
+        if size == largest_size:
+            continue
+        
+        # If any log is larger than largest, that's a violation
+        if size > largest_size:
+            return False
+        
+        # For smaller logs: check based on allow_multiple_versions flag
+        if allow_multiple_versions:
+            # Check if AT LEAST ONE is a valid prefix
+            # This allows multiple different versions of the same size
+            has_valid_prefix = False
+            for log in logs_of_size:
+                msgs_small = log["inputs"]["messages"]
+                is_valid_prefix = True
+                
+                for i, m in enumerate(msgs_small):
+                    normalized_small = normalize_message_for_comparison(m)
+                    normalized_large = normalize_message_for_comparison(msgs_large[i])
+                    if normalized_small != normalized_large:
+                        print("normalized_small != normalized_large")
+                        is_valid_prefix = False
+                        break
+                
+                if is_valid_prefix:
+                    has_valid_prefix = True
+                    break  # Found at least one valid prefix for this size
+            
+            # If no log of this size is a valid prefix, fail
+            if not has_valid_prefix:
+                return False
+        else:
+            # Strict mode: ALL logs must be valid prefixes
+            for log in logs_of_size:
+                msgs_small = log["inputs"]["messages"]
+                
+                for i, m in enumerate(msgs_small):
+                    normalized_small = normalize_message_for_comparison(m)
+                    normalized_large = normalize_message_for_comparison(msgs_large[i])
+                    if normalized_small != normalized_large:
+                        return False  # Any mismatch fails the check
+    
     return True
 
 
@@ -178,6 +251,7 @@ def filter_logs_by_model(
     model_name: str,
     data: dict,
     system_prompt_prefix: str = "You are an expert assistant who can solve any task using code blobs",
+    verbose: bool = False,
 ) -> list:
     """
     Filter raw logging results for a given model name and system prompt prefix.
@@ -191,14 +265,42 @@ def filter_logs_by_model(
     Returns:
         list: A list of filtered log entries.
     """
+    raw_logging_results = data.get("raw_logging_results", [])
+    
+    if verbose:
+        print(f"      🔍 [VERBOSE] filter_logs_by_model starting")
+        print(f"      🔍 [VERBOSE]   Total raw_logging_results: {len(raw_logging_results)}")
+        if model_name is None:
+            print(f"      🔍 [VERBOSE]   Filtering for model: None (will filter by system prompt only)")
+        else:
+            print(f"      🔍 [VERBOSE]   Filtering for model: {model_name}")
+        print(f"      🔍 [VERBOSE]   System prompt prefix: {system_prompt_prefix[:50]}...")
+    
     filtered_entries = []
-    for entry in data.get("raw_logging_results", []):
+    model_match_count = 0
+    first_message_match_count = 0
+    first_message_roles = {}  # Track distribution of roles in first messages
+    
+    for entry in raw_logging_results:
+        # If model_name is None, skip model check and filter by system prompt only
+        model_matches = (model_name is None) or (entry["inputs"].get("model") == model_name)
+        
+        if model_matches:
+            model_match_count += 1
+        
+        # Get first message regardless of role
         if (
-            entry["inputs"].get("model") == model_name
+            model_matches
             and entry["inputs"].get("messages")
-            and entry["inputs"]["messages"][0].get("role") == "system"
+            and len(entry["inputs"]["messages"]) > 0
         ):
             first_message = entry["inputs"]["messages"][0]
+            role = first_message.get("role", "unknown")
+            
+            # Track role distribution (only for verbose mode)
+            if verbose:
+                first_message_roles[role] = first_message_roles.get(role, 0) + 1
+            
             content = first_message.get("content")
 
             content_matches = False
@@ -213,7 +315,16 @@ def filter_logs_by_model(
                 content_matches = content.startswith(system_prompt_prefix)
 
             if content_matches:
+                first_message_match_count += 1
                 filtered_entries.append(entry)
+
+    if verbose:
+        print(f"      🔍 [VERBOSE] filter_logs_by_model completed:")
+        print(f"      🔍 [VERBOSE]   Model matches: {model_match_count}")
+        if first_message_roles:
+            print(f"      🔍 [VERBOSE]   First message roles distribution: {first_message_roles}")
+        print(f"      🔍 [VERBOSE]   First message content matches: {first_message_match_count}")
+        print(f"      🔍 [VERBOSE]   Final filtered entries: {len(filtered_entries)}")
 
     return filtered_entries
 
@@ -224,6 +335,7 @@ def task_id_to_transcript(
     system_prompt_prefix: str = "You are an expert assistant who can solve any task using code blobs",
     task_id_key: str = "weave_task_id",
     benchmark: str = "unknown",
+    verbose: bool = False,
 ) -> Tuple[dict, int]:
     """
     Build a dictionary mapping each task_id to its full transcript (messages)
@@ -239,11 +351,21 @@ def task_id_to_transcript(
     Returns:
         tuple: (transcripts_dict, failed_sanity_checks_count)
     """
+    if verbose:
+        print(f"   🔍 [VERBOSE] Starting task_id_to_transcript")
+        print(f"   🔍 [VERBOSE] Model: {model_name}, Benchmark: {benchmark}")
+    
     # Step 1: filter logs
-    filtered_logs = filter_logs_by_model(model_name, data, system_prompt_prefix)
+    filtered_logs = filter_logs_by_model(model_name, data, system_prompt_prefix, verbose)
+    
+    if verbose:
+        print(f"   🔍 [VERBOSE] Filtered logs count: {len(filtered_logs)}")
 
     # Step 2: extract task_ids
-    task_ids = extract_task_ids(filtered_logs, task_id_key=task_id_key)
+    task_ids = extract_task_ids(filtered_logs, task_id_key=task_id_key, verbose=verbose)
+    
+    if verbose:
+        print(f"   🔍 [VERBOSE] Unique task_ids count: {len(task_ids)}")
 
     transcripts = {}
     failed_sanity_checks = 0
@@ -269,6 +391,11 @@ def task_id_to_transcript(
             task_logs, key=lambda x: len(x["inputs"]["messages"]), reverse=True
         )
         transcripts[task_id] = task_logs_sorted[0]
+
+    if verbose:
+        print(f"   🔍 [VERBOSE] Completed task_id_to_transcript:")
+        print(f"   🔍 [VERBOSE]   Transcripts created: {len(transcripts)}")
+        print(f"   🔍 [VERBOSE]   Failed sanity checks: {failed_sanity_checks}")
 
     return transcripts, failed_sanity_checks
 
@@ -681,13 +808,15 @@ def analyze_benchmark_files(
 
         # Check that there's only one unique model in the JSON
         if len(models_from_json) == 0:
-            raise ValueError(f"No model found in JSON content for file: {file_path}")
+            warnings.warn(f"No model found in JSON content for file: {file_path}")
+            model_name_from_json = None  # Set to None to filter by system prompt only
         elif len(models_from_json) > 1:
-            raise ValueError(
+            warnings.warn(
                 f"Multiple models found in JSON content for file {file_path}: {models_from_json}"
             )
-
-        model_name_from_json = list(models_from_json)[0]
+            model_name_from_json = list(models_from_json)[0]  # Use first model found
+        else:
+            model_name_from_json = list(models_from_json)[0]
 
         # Store results
         results[file_path] = {
@@ -699,7 +828,7 @@ def analyze_benchmark_files(
 
 
 def default_task_processor(
-    task_logs_dict, data, model_name, conversion_function, max_runs
+    task_logs_dict, data, model_name, conversion_function, max_runs, verbose=False
 ):
     """
     Default task processor for dictionary-based eval results.
@@ -721,11 +850,17 @@ def default_task_processor(
 
     # Extract config for all tasks in this file
     config_data = data.get("config", {})
+    
+    if verbose:
+        print(f"   🔍 [VERBOSE] Processing {len(task_logs_dict)} task logs")
+        print(f"   🔍 [VERBOSE] Max runs to process: {max_runs}")
 
     # Use the model name from JSON extraction
 
     for task_id, log_entry in task_logs_dict.items():
         if processed >= max_runs:
+            if verbose:
+                print(f"   🔍 [VERBOSE] Reached max runs limit ({max_runs}), stopping")
             break
 
         eval_results_data = data.get("raw_eval_results", {}).get(task_id)
@@ -735,14 +870,26 @@ def default_task_processor(
             continue
 
         try:
+            if verbose:
+                print(f"   🔍 [VERBOSE] Processing task {processed+1}/{max_runs}: {task_id}")
+            
             agent_run = conversion_function(
-                log_entry, model_name, eval_results_data, config_data
+                log_entry, model_name, eval_results_data, config_data, verbose
             )
             agent_runs.append(agent_run)
             processed += 1
+            
+            if verbose:
+                print(f"   🔍 [VERBOSE] ✓ Successfully processed task {task_id}")
         except Exception as e:
             print(f"   ❌ Error processing task_id={task_id}: {e}")
+            if verbose:
+                import traceback
+                print(f"   🔍 [VERBOSE] Traceback: {traceback.format_exc()}")
             continue
+
+    if verbose:
+        print(f"   🔍 [VERBOSE] Completed processing: {len(agent_runs)} agent runs created")
 
     return agent_runs
 
@@ -759,6 +906,7 @@ def process_benchmark_files(
     task_processor=None,
     generate_report: bool = True,
     download_if_missing: bool = False,
+    verbose: bool = False,
 ):
     """
     Generic function to process benchmark files and return agent runs.
@@ -775,11 +923,19 @@ def process_benchmark_files(
         task_processor: Optional function to process tasks and return agent runs
         generate_report (bool): Whether to generate a PDF report of the results
         download_if_missing (bool): Whether to download files from HF if not found locally
+        verbose (bool): Whether to enable verbose logging for debugging
 
     Returns:
         Tuple[List[AgentRun], str, str]: List of agent runs, collection name, and report path (if generated)
     """
     from docent.data_models import AgentRun
+    
+    if verbose:
+        print(f"🔍 [VERBOSE] Starting process_benchmark_files")
+        print(f"🔍 [VERBOSE] Directory: {directory}")
+        print(f"🔍 [VERBOSE] File pattern: {file_pattern}")
+        print(f"🔍 [VERBOSE] Dry run: {dry_run}")
+        print(f"🔍 [VERBOSE] Download if missing: {download_if_missing}")
 
     # Create timestamped temporary directory if downloading
     temp_directory = None
@@ -829,51 +985,58 @@ def process_benchmark_files(
         # Step 3: get task_id -> largest log (transcript)
         benchmark_name = collection_name_prefix.lower().replace(" ", "_")
         task_logs_dict, failed_count = task_id_to_transcript(
-            data, model_name, system_prompt_prefix, benchmark=benchmark_name
+            data, model_name, system_prompt_prefix, benchmark=benchmark_name, verbose=verbose
         )
+        
+        if verbose:
+            print(f"   🔍 [VERBOSE] task_logs_dict size: {len(task_logs_dict)}")
+            print(f"   🔍 [VERBOSE] failed_count: {failed_count}")
 
         # Initialize model stats if not exists
         if model_name not in model_success_stats:
-            # In dry run mode, we limit the runs, so total_tasks_attempted should reflect actual processing
-            total_tasks_available = len(task_logs_dict) + failed_count
-            max_runs_to_process = (
-                max_runs_per_model if dry_run else total_tasks_available
-            )
-
             model_success_stats[model_name] = {
-                "total_tasks_attempted": total_tasks_available,
-                "total_tasks_processed": min(
-                    max_runs_to_process, len(task_logs_dict)
-                ),  # Actual tasks we'll process
+                "total_tasks_attempted": 0,  # Will be incremented as we process files
+                "total_tasks_processed": 0,  # Will be incremented with actual processed tasks
                 "successful_runs": 0,
                 "sanity_check_failures": 0,
                 "eval_failures": 0,
                 "success_rate": 0.0,
             }
+        
+        # Track total tasks attempted (includes both successful and failed)
+        total_tasks_in_file = len(task_logs_dict) + failed_count
+        model_success_stats[model_name]["total_tasks_attempted"] += total_tasks_in_file
 
         # Track failed sanity checks by model
         if failed_count > 0:
             if model_name not in failed_sanity_checks_by_model:
                 failed_sanity_checks_by_model[model_name] = 0
             failed_sanity_checks_by_model[model_name] += failed_count
-            model_success_stats[model_name]["sanity_check_failures"] = failed_count
+            model_success_stats[model_name]["sanity_check_failures"] += failed_count
 
         # Step 4: process tasks using the appropriate processor
         max_runs = max_runs_per_model if dry_run else len(task_logs_dict)
         processor = task_processor or default_task_processor
+        
+        if verbose:
+            print(f"   🔍 [VERBOSE] Using processor: {processor.__name__}")
+            print(f"   🔍 [VERBOSE] Processing up to {max_runs} tasks")
 
         file_agent_runs = processor(
-            task_logs_dict, data, model_name, conversion_function, max_runs
+            task_logs_dict, data, model_name, conversion_function, max_runs, verbose
         )
         agent_runs.extend(file_agent_runs)
 
-        # Update success statistics
-        model_success_stats[model_name]["successful_runs"] = len(file_agent_runs)
-        # Use total_tasks_processed for dry run mode to get accurate success rate
-        total_processed = model_success_stats[model_name]["total_tasks_processed"]
-        if total_processed > 0:
+        # Update success statistics (increment, not overwrite!)
+        model_success_stats[model_name]["successful_runs"] += len(file_agent_runs)
+        model_success_stats[model_name]["total_tasks_processed"] += len(file_agent_runs)
+        
+        # Recalculate success rate: successful / total_attempted * 100
+        total_attempted = model_success_stats[model_name]["total_tasks_attempted"]
+        successful = model_success_stats[model_name]["successful_runs"]
+        if total_attempted > 0:
             model_success_stats[model_name]["success_rate"] = (
-                len(file_agent_runs) / total_processed
+                successful / total_attempted
             ) * 100
 
         print(f"   ✅ Processed {len(file_agent_runs)} agent runs from this file")
@@ -915,15 +1078,10 @@ def process_benchmark_files(
                 "✅" if success_rate >= 90 else "⚠️" if success_rate >= 70 else "❌"
             )
 
-            # Show different format for dry run vs full run
-            if dry_run:
-                print(
-                    f"   {status_emoji} {model}: {success_rate:.1f}% success ({successful_runs}/{total_processed} runs processed, {total_attempted} available)"
-                )
-            else:
-                print(
-                    f"   {status_emoji} {model}: {success_rate:.1f}% success ({successful_runs}/{total_processed} runs)"
-                )
+            # Show success rate as: successful / total_attempted
+            print(
+                f"   {status_emoji} {model}: {success_rate:.1f}% success ({successful_runs}/{total_attempted} runs)"
+            )
 
             if sanity_failures > 0 or eval_failures > 0:
                 print(
