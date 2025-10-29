@@ -11,6 +11,7 @@ Supports both generalist and specialist agent patterns:
 import argparse
 import ast
 import json
+import logging
 import os
 import re
 from datetime import datetime
@@ -527,7 +528,7 @@ def hal_corebench_to_docent_corebench(
     )
 
     agent_run = AgentRun(
-        transcripts={"default": transcript},
+        transcripts=[transcript],
         metadata=metadata_dict,
     )
 
@@ -868,6 +869,7 @@ def process_corebench_file(
 def process_all_corebench_files(
     directory: str,
     pattern: str,
+    log_dir: str,
     max_files: int | None = None,
     max_tasks_per_file: int | None = None,
     target_first_message_prefix: str = "",
@@ -880,6 +882,7 @@ def process_all_corebench_files(
     Args:
         directory: Directory containing the JSON files
         pattern: Regex pattern to match files (generalist or specialist)
+        log_dir: Directory to write individual log files
         max_files: Maximum number of files to process
         max_tasks_per_file: Maximum number of tasks to process per file
         target_first_message_prefix: The expected first message prefix for filtering (optional)
@@ -889,6 +892,8 @@ def process_all_corebench_files(
     Returns:
         List of all AgentRun objects
     """
+    from contextlib import redirect_stdout
+    
     all_agent_runs = []
 
     # Find all JSON files in the directory matching the pattern
@@ -903,25 +908,36 @@ def process_all_corebench_files(
 
     print(f"\n🔍 Found {len(json_files)} JSON files matching pattern in {directory}")
     print(f"   Pattern: {pattern}")
+    print(f"   Log directory: {log_dir}")
 
     if max_files:
         json_files = json_files[:max_files]
         print(f"   Limiting to first {max_files} files")
 
     for json_file in json_files:
-        print(f"\n{'=' * 80}")
-        print(f"📄 Processing file: {json_file}")
-        print(f"{'=' * 80}")
-
-        file_path = os.path.join(directory, json_file)
-        agent_runs = process_corebench_file(
-            file_path,
-            max_tasks=max_tasks_per_file,
-            target_first_message_prefix=target_first_message_prefix,
-            is_generalist=is_generalist,
-            verbose=verbose,
-        )
-        all_agent_runs.extend(agent_runs)
+        log_filename = json_file.replace("_UPLOAD.json", ".log")
+        log_path = os.path.join(log_dir, log_filename)
+        os.makedirs(log_dir, exist_ok=True)
+        
+        print(f"\n📄 Processing file: {json_file} -> {log_path}")
+        
+        with open(log_path, 'w') as log_file:
+            with redirect_stdout(log_file):
+                print(f"{'=' * 80}")
+                print(f"Processing file: {json_file}")
+                print(f"{'=' * 80}")
+                
+                file_path = os.path.join(directory, json_file)
+                agent_runs = process_corebench_file(
+                    file_path,
+                    max_tasks=max_tasks_per_file,
+                    target_first_message_prefix=target_first_message_prefix,
+                    is_generalist=is_generalist,
+                    verbose=verbose,
+                )
+                all_agent_runs.extend(agent_runs)
+                
+                print(f"\n✅ Processed {len(agent_runs)} agent runs from this file")
 
     print(f"\n✅ Total agent runs collected: {len(all_agent_runs)}")
     return all_agent_runs
@@ -960,6 +976,12 @@ def main():
         action="store_true",
         help="Enable verbose logging for debugging",
     )
+    parser.add_argument(
+        "--log-dir",
+        type=str,
+        default=None,
+        help="Directory to write log files (one per input file)",
+    )
     args = parser.parse_args()
 
     # Configuration based on agent type
@@ -967,6 +989,11 @@ def main():
     script_dir = os.path.dirname(os.path.abspath(__file__))
     project_root = os.path.dirname(script_dir)  # Go up one level
     directory = os.path.join(project_root, "hal_traces", "core_bench_data")
+    
+    if args.log_dir:
+        log_dir = args.log_dir
+    else:
+        log_dir = os.path.join(script_dir, "logs", "core_bench", args.agent_type)
 
     if args.agent_type == "generalist":
         pattern = COREBENCH_GENERALIST_PATTERN
@@ -1008,6 +1035,7 @@ def main():
     agent_runs = process_all_corebench_files(
         directory=directory,
         pattern=pattern,
+        log_dir=log_dir,
         max_files=max_files,
         max_tasks_per_file=max_tasks_per_file,
         target_first_message_prefix=target_first_message_prefix,
@@ -1030,7 +1058,7 @@ def main():
     )
 
     # Upload agent runs in chunks
-    chunk_size = 50
+    chunk_size = 100
     total_runs = len(agent_runs)
 
     for i in range(0, total_runs, chunk_size):
