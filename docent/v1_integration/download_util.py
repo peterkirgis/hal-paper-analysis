@@ -34,9 +34,7 @@ DEFAULT_REVISION = "main"
 
 def derive_key(password: str, salt: bytes) -> bytes:
     """Derive encryption key from password and salt."""
-    kdf = PBKDF2HMAC(
-        algorithm=hashes.SHA256(), length=32, salt=salt, iterations=480000
-    )
+    kdf = PBKDF2HMAC(algorithm=hashes.SHA256(), length=32, salt=salt, iterations=480000)
     return base64.urlsafe_b64encode(kdf.derive(password.encode()))
 
 
@@ -212,7 +210,10 @@ def main():
         help="Output directory for downloaded files",
     )
     parser.add_argument(
-        "--max-files", type=int, default=None, help="Maximum number of files to download"
+        "--max-files",
+        type=int,
+        default=None,
+        help="Maximum number of files to download",
     )
     args = parser.parse_args()
 
@@ -229,6 +230,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-
