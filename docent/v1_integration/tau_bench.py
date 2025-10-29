@@ -493,6 +493,150 @@ def hal_taubench_to_docent_taubench(
 # ============================================================================
 
 
+def deduplicate_log_entries(
+    log_entries: List[Dict[str, Any]],
+    model_name: str,
+    target_first_message_prefix: str,
+    task_id: str = "unknown",
+    verbose: bool = True,
+) -> List[Dict[str, Any]]:
+    """
+    Deduplicate log entries through three filtering stages:
+    1. Filter by first message prefix
+    2. Filter by model name
+    3. Remove duplicate entries based on message content and role
+    
+    Args:
+        log_entries: List of log entries for a single task
+        model_name: The model name to filter by
+        target_first_message_prefix: The expected first message prefix
+        task_id: Task ID for logging purposes
+        verbose: Whether to print detailed logging
+        
+    Returns:
+        Deduplicated list of log entries
+    """
+    if not log_entries:
+        return []
+    
+    if verbose:
+        print(f"\n   🔍 Processing {task_id}:")
+        print(f"      Initial: {len(log_entries)} log entries")
+        # Show message counts with entry numbers
+        for i, entry in enumerate(log_entries, start=1):
+            messages = entry.get("inputs", {}).get("messages", [])
+            entry_model = entry.get("inputs", {}).get("model", "unknown")
+            print(f"         - Log {i}: {len(messages)} messages in inputs, model={entry_model}")
+    
+    # Stage 1: Filter by first message prefix
+    first_stage_filtered = []
+    for log_entry in log_entries:
+        messages = log_entry.get("inputs", {}).get("messages", [])
+        if messages and len(messages) > 0:
+            first_message_content = messages[0].get("content", "")
+
+            # Handle content that might be a list of dicts with 'type' and 'text'
+            first_message_text = ""
+            if isinstance(first_message_content, list):
+                # Filter dicts with type="text" and extract the "text" field
+                text_dicts = [
+                    item
+                    for item in first_message_content
+                    if isinstance(item, dict) and item.get("type") == "text"
+                ]
+                if text_dicts:
+                    # Usually just one dict, take the first one
+                    first_message_text = text_dicts[0].get("text", "")
+            else:
+                first_message_text = str(first_message_content)
+
+            if first_message_text.startswith(target_first_message_prefix):
+                first_stage_filtered.append(log_entry)
+    
+    if verbose:
+        removed_entries = [entry for entry in log_entries if entry not in first_stage_filtered]
+        removed_msg_counts = [len(entry.get("inputs", {}).get("messages", [])) for entry in removed_entries]
+        print(f"      Stage 1 (prefix filter): {len(first_stage_filtered)} entries (removed {len(log_entries) - len(first_stage_filtered)})")
+        if removed_msg_counts:
+            print(f"         Removed entries had message counts: {removed_msg_counts}")
+    
+    if not first_stage_filtered:
+        return []
+    
+    # Stage 2: Filter by model name
+    second_stage_filtered = []
+    for log_entry in first_stage_filtered:
+        entry_model = log_entry.get("inputs", {}).get("model", "unknown")
+        if entry_model == model_name:
+            second_stage_filtered.append(log_entry)
+    
+    if verbose:
+        removed_entries = [entry for entry in first_stage_filtered if entry not in second_stage_filtered]
+        removed_msg_counts = [len(entry.get("inputs", {}).get("messages", [])) for entry in removed_entries]
+        print(f"      Stage 2 (model filter): {len(second_stage_filtered)} entries (removed {len(first_stage_filtered) - len(second_stage_filtered)})")
+        if removed_msg_counts:
+            print(f"         Removed entries had message counts: {removed_msg_counts}")
+    
+    if not second_stage_filtered:
+        return []
+    
+    # Stage 3: Remove duplicates based on content
+    # Group by message count, then deduplicate within each group
+    by_length = {}
+    for entry in second_stage_filtered:
+        messages = entry.get("inputs", {}).get("messages", [])
+        msg_count = len(messages)
+        if msg_count not in by_length:
+            by_length[msg_count] = []
+        by_length[msg_count].append(entry)
+    
+    # For each message count group, deduplicate by content
+    unique_entries = []
+    for msg_count, entries in sorted(by_length.items()):
+        seen_signatures = set()
+        for entry in entries:
+            messages = entry.get("inputs", {}).get("messages", [])
+            
+            # Create a signature from the messages (role + full content)
+            signature_parts = []
+            for msg in messages:
+                role = msg.get("role", "")
+                content = msg.get("content", "")
+                
+                # Handle content that might be a list
+                if isinstance(content, list):
+                    content_str = str([
+                        item.get("text", "") if isinstance(item, dict) else str(item)
+                        for item in content
+                    ])
+                else:
+                    content_str = str(content)
+                
+                signature_parts.append(f"{role}:{content_str}")
+            
+            signature = "||".join(signature_parts)
+            
+            if signature not in seen_signatures:
+                seen_signatures.add(signature)
+                unique_entries.append(entry)
+    
+    if verbose:
+        removed_entries = [entry for entry in second_stage_filtered if entry not in unique_entries]
+        removed_msg_counts = [len(entry.get("inputs", {}).get("messages", [])) for entry in removed_entries]
+        print(f"      Stage 3 (deduplication): {len(unique_entries)} entries (removed {len(second_stage_filtered) - len(unique_entries)})")
+        if removed_msg_counts:
+            print(f"         Removed entries had message counts: {removed_msg_counts}")
+        # Show final message counts with entry numbers
+        print(f"      Final deduplicated entries:")
+        for i, entry in enumerate(unique_entries, start=1):
+            messages = entry.get("inputs", {}).get("messages", [])
+            entry_model = entry.get("inputs", {}).get("model", "unknown")
+            print(f"         - Log {i}: {len(messages)} messages in inputs, model={entry_model}")
+        print(f"      ✅ Total removed: {len(log_entries) - len(unique_entries)} duplicate/filtered entries")
+    
+    return unique_entries
+
+
 def process_taubench_file(
     file_path: str,
     max_tasks: int | None = None,
@@ -574,76 +718,28 @@ def process_taubench_file(
         model_name = model_name.replace("together_ai/", "")
         print(f"   🔧 Normalized model name from '{original_model_name}' to: '{model_name}'")
 
-    # First stage filter: filter by first message prefix
-    first_stage_filtered = {}
-    for task_id, log_entries in task_logs_dict.items():
-        # Check if any log entry has a first message with the target prefix
-        matching_logs = []
-        for log_entry in log_entries:
-            messages = log_entry.get("inputs", {}).get("messages", [])
-            if messages and len(messages) > 0:
-                first_message_content = messages[0].get("content", "")
-
-                # Handle content that might be a list of dicts with 'type' and 'text'
-                first_message_text = ""
-                if isinstance(first_message_content, list):
-                    # Filter dicts with type="text" and extract the "text" field
-                    text_dicts = [
-                        item
-                        for item in first_message_content
-                        if isinstance(item, dict) and item.get("type") == "text"
-                    ]
-                    if text_dicts:
-                        # Usually just one dict, take the first one
-                        first_message_text = text_dicts[0].get("text", "")
-                else:
-                    first_message_text = str(first_message_content)
-
-                if first_message_text.startswith(target_first_message_prefix):
-                    matching_logs.append(log_entry)
-
-        # Only include this task if we found matching logs
-        if matching_logs:
-            first_stage_filtered[task_id] = matching_logs
-
-    print(f"   📊 After first stage filter (message prefix): {len(first_stage_filtered)} tasks")
+    # Deduplicate log entries for each task through all three filtering stages
+    deduped_task_logs = {}
+    print("\n   🔄 Deduplicating log entries for each task...")
     
-    for task_id, log_entries in sorted(first_stage_filtered.items()):
-        print(f"   ✓ First stage - Task {task_id}: {len(log_entries)} matching log entries")
-        for i, entry in enumerate(log_entries):
-            messages = entry.get("inputs", {}).get("messages", [])
-            entry_model = entry.get("inputs", {}).get("model", "unknown")
-            print(f"      - Log {i + 1}: {len(messages)} messages in inputs, model={entry_model}")
-
-    # Second stage filter: filter by model name
-    filtered_task_logs = {}
-    for task_id, log_entries in first_stage_filtered.items():
-        # Filter logs that match the model name
-        matching_logs = []
-        for log_entry in log_entries:
-            entry_model = log_entry.get("inputs", {}).get("model", "unknown")
-            
-            if entry_model == model_name:
-                matching_logs.append(log_entry)
-        
-        # Only include this task if we found matching logs
-        if matching_logs:
-            filtered_task_logs[task_id] = matching_logs
-
-    print(f"   📊 After second stage filter (model name): {len(filtered_task_logs)} tasks")
-
-    for task_id, log_entries in sorted(filtered_task_logs.items()):
-        print(f"   ✓ Second stage - Task {task_id}: {len(log_entries)} matching log entries")
-        for i, entry in enumerate(log_entries):
-            messages = entry.get("inputs", {}).get("messages", [])
-            entry_model = entry.get("inputs", {}).get("model", "unknown")
-            print(f"      - Log {i + 1}: {len(messages)} messages in inputs, model={entry_model}")
+    for task_id, log_entries in task_logs_dict.items():
+        deduped_entries = deduplicate_log_entries(
+            log_entries, 
+            model_name, 
+            target_first_message_prefix,
+            task_id=task_id,
+            verbose=True
+        )
+        if deduped_entries:
+            deduped_task_logs[task_id] = deduped_entries
+    
+    print(f"\n   📊 Final result: {len(deduped_task_logs)} tasks with deduplicated log entries")
 
     # Process tasks
     agent_runs = []
     processed = 0
 
-    for task_id, log_entries in filtered_task_logs.items():
+    for task_id, log_entries in deduped_task_logs.items():
         if max_tasks and processed >= max_tasks:
             break
 
