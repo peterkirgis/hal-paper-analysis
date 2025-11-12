@@ -15,6 +15,7 @@ import logging
 import os
 import re
 from datetime import datetime
+from dateutil import parser as dateutil_parser
 from typing import Any, Dict, List
 
 from dotenv import load_dotenv
@@ -70,11 +71,42 @@ class USACOMetadata(BaseModel):
     problem_level: str | None = Field(
         None, description="USACO problem level (bronze, silver, gold, platinum)"
     )
+    num_tests: int | None = Field(None, description="Total number of tests")
+    status: str | None = Field(None, description="Overall test status")
+    num_passed: int | None = Field(None, description="Number of tests passed")
+    fraction_passed: float | None = Field(None, description="Fraction of tests passed")
 
 
 # ============================================================================
 # CORE CONVERSION LOGIC
 # ============================================================================
+
+
+def normalize_generalist_content(content: str) -> str:
+    """
+    Normalize generalist agent content by removing <end_code> and tool call metadata.
+
+    For generalist agents:
+    - Entry content: may or may not have <end_code>
+    - Transcript content: may have <end_code> at the end
+
+    We need to normalize both by removing <end_code> markers and anything after them.
+
+    Args:
+        content: Raw content string from log entry or transcript
+
+    Returns:
+        Normalized content string
+    """
+    # Remove <end_code> and everything after it (including "Calling tools:" section)
+    if "<end_code>" in content:
+        content = content.split("<end_code>")[0]
+
+    # Also handle the "Calling tools:" pattern even if <end_code> is missing
+    if "Calling tools:" in content:
+        content = content.split("Calling tools:")[0]
+
+    return content.strip()
 
 
 def extract_tool_calls(input_str: str) -> List[Dict[str, Any]] | None:
@@ -145,9 +177,25 @@ def parse_message_dict_to_chat_message(
                     if thinking_text:
                         content_list.append(ContentReasoning(reasoning=thinking_text))
 
+        # Check for DeepSeek <think> blocks in content and extract them as reasoning
+        think_content = ""
+        main_content = content
+        if content and "<think>" in content and "</think>" in content:
+            # Extract the thinking block
+            think_match = re.search(r"<think>(.*?)</think>", content, re.DOTALL)
+            if think_match:
+                think_content = think_match.group(1).strip()
+                # Remove the <think> block from main content
+                main_content = re.sub(
+                    r"<think>.*?</think>\s*", "", content, flags=re.DOTALL
+                ).strip()
+                # Add thinking as ContentReasoning
+                if think_content:
+                    content_list.append(ContentReasoning(reasoning=think_content))
+
         # Add main content as ContentText
-        if content:
-            content_list.append(ContentText(text=content))
+        if main_content:
+            content_list.append(ContentText(text=main_content))
 
         # Check if there are tool calls in the content
         extracted_tool_calls = extract_tool_calls(content)
@@ -218,8 +266,17 @@ def reconstruct_conversation_from_log_entries_specialist(
     """
     Reconstruct conversation for SPECIALIST agents (single message increments).
 
-    For specialist agents, each turn adds exactly one user message and one assistant response.
-    We simply take the last message from inputs and add the assistant's output.
+    For specialist agents:
+    - First entry contains the full context (system + all initial messages)
+    - Subsequent entries add one new user message + assistant response
+
+    Strategy:
+    - Use ALL messages from the first entry
+    - For subsequent entries, add only the last message from inputs (new user message) + output
+
+    USACO-specific filtering:
+    - If multiple entries have same message count, prefer the one with RAG markers
+      '[BEGIN SIMILAR PROBLEMS]' and '[END SIMILAR PROBLEMS]'
 
     Args:
         log_entries: List of log entry dictionaries sorted by created_timestamp
@@ -231,10 +288,103 @@ def reconstruct_conversation_from_log_entries_specialist(
     if not log_entries:
         return []
 
+    # USACO-specific: Filter entries to prefer RAG version when duplicates exist
+    # Group entries by message count
+    entries_by_count = {}
+    for entry in log_entries:
+        msg_count = len(entry.get("inputs", {}).get("messages", []))
+        if msg_count not in entries_by_count:
+            entries_by_count[msg_count] = []
+        entries_by_count[msg_count].append(entry)
+
+    # For each message count with duplicates, prefer the RAG version
+    filtered_entries = []
+    for msg_count, entries in sorted(entries_by_count.items()):
+        if len(entries) > 1:
+            # Check for RAG markers in entries
+            rag_entry = None
+            for entry in entries:
+                messages = entry.get("inputs", {}).get("messages", [])
+                # Check if any message contains RAG markers
+                has_rag = False
+                for msg in messages:
+                    content = str(msg.get("content", ""))
+                    if (
+                        "[BEGIN SIMILAR PROBLEMS]" in content
+                        and "[END SIMILAR PROBLEMS]" in content
+                    ):
+                        has_rag = True
+                        break
+
+                if has_rag:
+                    rag_entry = entry
+                    break
+
+            # Use RAG entry if found, otherwise use first entry
+            filtered_entries.append(rag_entry if rag_entry else entries[0])
+
+            if verbose and rag_entry:
+                print(
+                    f"      🔍 Found {len(entries)} entries with {msg_count} messages - picked RAG version"
+                )
+        else:
+            # Only one entry with this count
+            filtered_entries.append(entries[0])
+
+    # Use filtered entries for reconstruction
+    log_entries = filtered_entries
+
+    # Assert that we now have unique message counts (no duplicates)
+    message_counts = [
+        len(entry.get("inputs", {}).get("messages", [])) for entry in log_entries
+    ]
+    assert len(message_counts) == len(set(message_counts)), (
+        f"After RAG filtering, still have duplicate message counts: {message_counts}"
+    )
+
     conversation = []
 
-    # For each entry, add the last input message and then the output
-    for idx, entry in enumerate(log_entries, start=1):
+    # Process first entry: add ALL input messages
+    first_entry = log_entries[0]
+    first_entry_messages = first_entry.get("inputs", {}).get("messages", [])
+
+    # Assert that first entry has exactly 1 message (single turn)
+    assert len(first_entry_messages) == 1, (
+        f"First entry should have exactly 1 message (single turn), but has {len(first_entry_messages)} messages"
+    )
+
+    if verbose:
+        print(
+            f"      Entry 1 (first): {len(first_entry_messages)} messages in inputs - adding ALL"
+        )
+
+    for msg in first_entry_messages:
+        conversation.append(parse_message_dict_to_chat_message(msg))
+
+    # Add first entry's output
+    output = first_entry.get("output")
+    if output is not None:
+        choices = output.get("choices", [])
+        if choices and len(choices) > 0:
+            assistant_message = choices[0].get("message", {})
+            assistant_content = assistant_message.get("content", "")
+            thinking_blocks = assistant_message.get("thinking_blocks", [])
+
+            if verbose:
+                content_preview = str(assistant_content)[:100]
+                print(f"      ✅ Adding assistant output from entry 1")
+                print(f"      Assistant content preview: {content_preview}")
+                print(f"      Thinking blocks: {len(thinking_blocks)}")
+
+            output_msg_dict = {
+                "role": "assistant",
+                "content": assistant_content,
+                "thinking_blocks": thinking_blocks,
+            }
+            conversation.append(parse_message_dict_to_chat_message(output_msg_dict))
+
+    # Process subsequent entries: add only the LAST message from inputs + output
+    for idx, entry in enumerate(log_entries[1:], start=2):
         entry_input_messages = entry.get("inputs", {}).get("messages", [])
 
         if verbose:
@@ -243,11 +393,11 @@ def reconstruct_conversation_from_log_entries_specialist(
                 f"      Current conversation length before: {len(conversation)} messages"
             )
 
-        # Add the last message from entry inputs (the user message for this turn)
+        # Add the last message from entry inputs (the NEW user message for this turn)
         if entry_input_messages:
             last_input_msg = entry_input_messages[-1]
             if verbose:
-                print(f"      ✅ Adding last input message")
+                print(f"      ✅ Adding last input message (new user message)")
                 content_raw = last_input_msg.get("content", "")
                 if isinstance(content_raw, list) and len(content_raw) > 0:
                     first_item = content_raw[0]
@@ -394,7 +544,7 @@ def reconstruct_conversation_from_log_entries_generalist(
 def hal_usaco_to_docent_usaco(
     log_entries: List[Dict[str, Any]],
     model_name: str,
-    eval_results_data: Dict[str, Any],
+    eval_data: Dict[str, Any],
     config_data: Dict[str, Any],
     is_generalist: bool = False,
     verbose: bool = False,
@@ -405,7 +555,7 @@ def hal_usaco_to_docent_usaco(
     Args:
         log_entries: List of log entry dictionaries for the same task_id (sorted by timestamp)
         model_name: The model name to assert against the log entries
-        eval_results_data: Evaluation results containing task results and metadata
+        eval_data: Dict containing "results" and "raw_eval_results"
         config_data: Configuration data for the run
         is_generalist: Whether this is a generalist agent (affects conversation reconstruction)
         verbose: Enable verbose logging
@@ -450,7 +600,7 @@ def hal_usaco_to_docent_usaco(
     budget = agent_args.get("budget")
 
     # Determine task success from successful_tasks and failed_tasks lists
-    results = eval_results_data
+    results = eval_data.get("results", {})
     successful_tasks = results.get("successful_tasks", [])
     failed_tasks = results.get("failed_tasks", [])
 
@@ -462,6 +612,18 @@ def hal_usaco_to_docent_usaco(
     problem_id = parts[0] if len(parts) > 0 else ""
     problem_level = parts[1] if len(parts) > 1 else None
     problem_name = parts[2].replace("_", " ").title() if len(parts) > 2 else task_id
+
+    # Extract test results from raw_eval_results["rdict"][task_id]
+    # Note: rdict[task_id] is a list, we take the first element
+    raw_eval_results = eval_data.get("raw_eval_results", {})
+    rdict = raw_eval_results.get("rdict", {})
+    task_eval_list = rdict.get(task_id, [])
+    task_eval_data = task_eval_list[0] if task_eval_list else {}
+
+    num_tests = task_eval_data.get("num_tests")
+    status = task_eval_data.get("status")
+    num_passed = task_eval_data.get("num_passed")
+    fraction_passed = task_eval_data.get("fraction_passed")
 
     metadata = USACOMetadata(
         benchmark_id="usaco",
@@ -486,6 +648,10 @@ def hal_usaco_to_docent_usaco(
         scoring_metadata=None,
         problem_name=problem_name,
         problem_level=problem_level,
+        num_tests=num_tests,
+        status=status,
+        num_passed=num_passed,
+        fraction_passed=fraction_passed,
     )
 
     # Convert metadata to dict
@@ -514,6 +680,7 @@ def deduplicate_log_entries(
     model_name: str,
     target_first_message_prefix: str,
     task_id: str = "unknown",
+    file_name: str = "unknown",
     verbose: bool = True,
 ) -> List[Dict[str, Any]]:
     """
@@ -605,11 +772,15 @@ def deduplicate_log_entries(
             len(entry.get("inputs", {}).get("messages", []))
             for entry in removed_entries
         ]
+        removed_models = [
+            entry.get("inputs", {}).get("model", "unknown") for entry in removed_entries
+        ]
         print(
             f"      Stage 2 (model filter): {len(second_stage_filtered)} entries (removed {len(first_stage_filtered) - len(second_stage_filtered)})"
         )
         if removed_msg_counts:
             print(f"         Removed entries had message counts: {removed_msg_counts}")
+            print(f"         Removed models: {removed_models}")
 
     if not second_stage_filtered:
         return []
@@ -625,21 +796,22 @@ def deduplicate_log_entries(
         by_length[msg_count].append(entry)
 
     # For each message count group, deduplicate by content
+    # When duplicates are found, prefer: 1) latest timestamp, 2) non-null output
     unique_entries = []
     for msg_count, entries in sorted(by_length.items()):
-        seen_signatures = set()
+        # First, create a content-only signature (without role) to detect entries with same content but different roles
+        content_signatures = {}  # content_signature -> list of entries
         for entry in entries:
             messages = entry.get("inputs", {}).get("messages", [])
 
-            # Create a signature from the messages (role + full content)
-            signature_parts = []
+            # Create content-only signature
+            content_parts = []
             for msg in messages:
-                role = msg.get("role", "")
                 content = msg.get("content", "")
 
                 # Handle content that might be a list
                 if isinstance(content, list):
-                    content_str = str(
+                    content_str = "\n".join(
                         [
                             item.get("text", "")
                             if isinstance(item, dict)
@@ -648,15 +820,156 @@ def deduplicate_log_entries(
                         ]
                     )
                 else:
-                    content_str = str(content)
+                    # Normalize None to empty string
+                    content_str = "" if content is None else str(content)
+
+                content_parts.append(content_str)
+
+            content_sig = "||".join(content_parts).strip()
+
+            if content_sig not in content_signatures:
+                content_signatures[content_sig] = []
+            content_signatures[content_sig].append(entry)
+
+        # For entries with same content sequences, prefer the one with first role="system" over first role="user"
+        filtered_entries = []
+        for content_sig, same_content_entries in content_signatures.items():
+            if len(same_content_entries) > 1:
+                # Multiple entries with same content sequences - check if they differ only in first role
+                # Group by first role
+                by_first_role = {}
+                for entry in same_content_entries:
+                    msgs = entry.get("inputs", {}).get("messages", [])
+                    if msgs:
+                        first_role = msgs[0].get("role", "")
+                        if first_role not in by_first_role:
+                            by_first_role[first_role] = []
+                        by_first_role[first_role].append(entry)
+
+                # If we have both "system" and "user" as first roles, prefer "system"
+                if "system" in by_first_role and "user" in by_first_role:
+                    # Keep only entries with first role="system"
+                    filtered_entries.extend(by_first_role["system"])
+                    if verbose:
+                        removed_count = len(by_first_role["user"])
+                        print(
+                            f"         Filtered {removed_count} entries with first role='user' (keeping entries with first role='system')"
+                        )
+                else:
+                    # No role conflict, keep all
+                    filtered_entries.extend(same_content_entries)
+            else:
+                # Only one entry with this content
+                filtered_entries.extend(same_content_entries)
+
+        # Now deduplicate by full signature (role + content)
+        seen_signatures = {}  # signature -> entry
+        for entry in filtered_entries:
+            messages = entry.get("inputs", {}).get("messages", [])
+
+            # Create a signature from the messages (role + full content)
+            signature_parts = []
+            for msg_idx, msg in enumerate(messages):
+                role = msg.get("role", "")
+                content = msg.get("content", "")
+
+                # Handle content that might be a list
+                if isinstance(content, list):
+                    # Join text content with newlines (same as .text property)
+                    content_str = "\n".join(
+                        [
+                            item.get("text", "")
+                            if isinstance(item, dict)
+                            else str(item)
+                            for item in content
+                        ]
+                    )
+                else:
+                    # Normalize None to empty string for comparison
+                    if content is None:
+                        print(
+                            f"*** Content is None for task {task_id}, normalizing to empty string"
+                        )
+                        content_str = ""
+
+                        # Log the entire message JSON to file
+                        # Use agent_type string for directory structure
+                        agent_type_str = (
+                            "generalist"
+                            if "hal_generalist_agent" in file_name
+                            else "specialist"
+                        )
+                        none_content_dir = os.path.join(
+                            "none_content_entries", agent_type_str, file_name, task_id
+                        )
+                        os.makedirs(none_content_dir, exist_ok=True)
+
+                        # Create a unique filename based on message index
+                        none_content_file = os.path.join(
+                            none_content_dir, f"message_{msg_idx}_none_content.json"
+                        )
+
+                        with open(none_content_file, "w") as f:
+                            json.dump(msg, f, indent=4)
+                    else:
+                        content_str = str(content)
 
                 signature_parts.append(f"{role}:{content_str}")
 
-            signature = "||".join(signature_parts)
+            signature = "||".join(signature_parts).strip()
 
+            # If we haven't seen this signature, add it
             if signature not in seen_signatures:
-                seen_signatures.add(signature)
-                unique_entries.append(entry)
+                seen_signatures[signature] = entry
+            else:
+                # We have a duplicate - decide which one to keep
+                existing_entry = seen_signatures[signature]
+
+                # Get output status
+                existing_has_output = existing_entry.get("output") is not None
+                current_has_output = entry.get("output") is not None
+
+                # Priority 1: Prefer entries with output over those without
+                # Priority 2: Among entries with same output status, prefer latest timestamp
+                should_replace = False
+
+                if current_has_output and not existing_has_output:
+                    # Current has output, existing doesn't - always replace
+                    should_replace = True
+                elif current_has_output == existing_has_output:
+                    # Both have same output status - compare timestamps
+                    existing_timestamp_str = existing_entry.get("created_timestamp", "")
+                    current_timestamp_str = entry.get("created_timestamp", "")
+
+                    # Parse timestamps for proper comparison
+                    try:
+                        existing_ts = (
+                            dateutil_parser.parse(existing_timestamp_str)
+                            if existing_timestamp_str
+                            else None
+                        )
+                        current_ts = (
+                            dateutil_parser.parse(current_timestamp_str)
+                            if current_timestamp_str
+                            else None
+                        )
+
+                        if current_ts and existing_ts and current_ts > existing_ts:
+                            should_replace = True
+                        elif current_ts and not existing_ts:
+                            # Current has valid timestamp, existing doesn't
+                            should_replace = True
+                    except (ValueError, TypeError):
+                        # If parsing fails, fall back to string comparison
+                        if current_timestamp_str > existing_timestamp_str:
+                            should_replace = True
+                # If existing has output and current doesn't, keep existing (don't replace)
+
+                if should_replace:
+                    seen_signatures[signature] = entry
+
+        # Add all unique entries (after deduplication) to the result
+        unique_entries.extend(seen_signatures.values())
 
     if verbose:
         removed_entries = [
@@ -686,6 +999,166 @@ def deduplicate_log_entries(
     return unique_entries
 
 
+def check_transcript_contains_largest_entry(
+    log_entries: List[Dict[str, Any]],
+    transcript_messages: List[Any],
+    task_id: str = "unknown",
+    file_name: str = "unknown",
+    is_generalist: bool = False,
+    verbose: bool = False,
+) -> Dict[str, Any]:
+    """
+    Check if the largest log entry is a subset of the built transcript.
+
+    Args:
+        log_entries: List of log entries for a single task (after deduplication)
+        transcript_messages: Built transcript messages (Docent format)
+        task_id: Task identifier for logging
+        file_name: File name for debug output
+        is_generalist: Whether this is a generalist agent (affects content normalization)
+        verbose: Whether to print detailed information
+
+    Returns:
+        Dictionary with check results
+    """
+    if not log_entries:
+        return {"is_subset": True, "reason": "No entries to check", "passed": True}
+
+    # Find entry with largest message count
+    max_entry = max(
+        log_entries, key=lambda e: len(e.get("inputs", {}).get("messages", []))
+    )
+    max_messages = max_entry.get("inputs", {}).get("messages", [])
+    max_count = len(max_messages)
+
+    if verbose:
+        print(
+            f"      Checking if largest entry ({max_count} messages) is subset of transcript ({len(transcript_messages)} messages)"
+        )
+
+    # Check if max_messages is a prefix subset of transcript_messages
+    is_subset = True
+    details = []
+
+    if max_count > len(transcript_messages):
+        is_subset = False
+        details.append(
+            f"Largest entry has {max_count} messages > transcript has {len(transcript_messages)}"
+        )
+    else:
+        # Check if first max_count messages match
+        for i in range(max_count):
+            entry_msg = max_messages[i]
+
+            # Get the transcript message (convert from Docent format)
+            transcript_msg = transcript_messages[i]
+
+            # Extract role from both
+            entry_role = entry_msg.get("role", "")
+
+            # Get role from Docent message object
+            if hasattr(transcript_msg, "role"):
+                transcript_role = transcript_msg.role
+            else:
+                # Fallback: infer from type
+                transcript_role = (
+                    type(transcript_msg).__name__.replace("Message", "").lower()
+                )
+
+            if entry_role != transcript_role:
+                is_subset = False
+                details.append(
+                    f"Role mismatch at position {i}: entry='{entry_role}', transcript='{transcript_role}'"
+                )
+                if not verbose:
+                    break
+
+            # Extract content from entry message
+            entry_content = entry_msg.get("content", "")
+            if isinstance(entry_content, list):
+                # Join text content with newlines (same as .text property)
+                entry_content_str = "\n".join(
+                    [
+                        item.get("text", "") if isinstance(item, dict) else str(item)
+                        for item in entry_content
+                    ]
+                )
+            else:
+                # Normalize None to empty string for comparison
+                entry_content_str = "" if entry_content is None else str(entry_content)
+
+            # Extract content from transcript message using .text property
+            transcript_content_str = (
+                transcript_msg.text
+                if hasattr(transcript_msg, "text")
+                else str(
+                    transcript_msg.content if hasattr(transcript_msg, "content") else ""
+                )
+            )
+
+            # Normalize content for generalist agents (remove <end_code> and tool call metadata from BOTH sides)
+            if is_generalist and entry_role == "assistant":
+                entry_content_str = normalize_generalist_content(entry_content_str)
+                transcript_content_str = normalize_generalist_content(
+                    transcript_content_str
+                )
+
+            if entry_content_str.strip() != transcript_content_str.strip():
+                is_subset = False
+                entry_preview = (
+                    entry_content_str[:30]
+                    if len(entry_content_str) > 30
+                    else entry_content_str
+                )
+                transcript_preview = (
+                    transcript_content_str[:30]
+                    if len(transcript_content_str) > 30
+                    else transcript_content_str
+                )
+                details.append(
+                    f"Content mismatch at position {i}: entry='{entry_preview}...' vs transcript='{transcript_preview}...'"
+                )
+
+                # Write full content to debug files
+                debug_dir = os.path.join("debug_mismatches", file_name, task_id)
+                os.makedirs(debug_dir, exist_ok=True)
+
+                entry_file = os.path.join(debug_dir, f"entry_pos_{i}.txt")
+                transcript_file = os.path.join(debug_dir, f"transcript_pos_{i}.txt")
+
+                with open(entry_file, "w") as f:
+                    f.write(f"Position: {i}\n")
+                    f.write(f"Role: {entry_role}\n")
+                    f.write(f"Length: {len(entry_content_str)} characters\n")
+                    f.write(f"{'=' * 80}\n")
+                    f.write(entry_content_str)
+
+                with open(transcript_file, "w") as f:
+                    f.write(f"Position: {i}\n")
+                    f.write(f"Role: {transcript_role}\n")
+                    f.write(f"Length: {len(transcript_content_str)} characters\n")
+                    f.write(f"{'=' * 80}\n")
+                    f.write(transcript_content_str)
+
+                if not verbose:
+                    break
+
+    result = {
+        "is_subset": is_subset,
+        "passed": is_subset,
+        "max_entry_count": max_count,
+        "transcript_count": len(transcript_messages),
+        "details": details if not is_subset else [],
+    }
+
+    if verbose and not is_subset:
+        print(f"      ❌ Check failed: {'; '.join(details)}")
+    elif verbose:
+        print(f"      ✅ Check passed")
+
+    return result
+
+
 def process_usaco_file(
     file_path: str,
     max_tasks: int | None = None,
@@ -712,6 +1185,7 @@ def process_usaco_file(
     # Extract config and eval results
     config_data = data.get("config", {})
     results_data = data.get("results", {})
+    raw_eval_results = data.get("raw_eval_results", {})
 
     if not results_data:
         print("   ❌ No results found, skipping file")
@@ -773,12 +1247,15 @@ def process_usaco_file(
     deduped_task_logs = {}
     print("\n   🔄 Deduplicating log entries for each task...")
 
+    file_name = os.path.basename(file_path).replace("_UPLOAD.json", "")
+
     for task_id, log_entries in task_logs_dict.items():
         deduped_entries = deduplicate_log_entries(
             log_entries,
             model_name,
             target_first_message_prefix,
             task_id=task_id,
+            file_name=file_name,
             verbose=True,
         )
         if deduped_entries:
@@ -788,8 +1265,96 @@ def process_usaco_file(
         f"\n   📊 Final result: {len(deduped_task_logs)} tasks with deduplicated log entries"
     )
 
+    # Check for duplicate message counts in deduplicated entries
+    print("\n   🔍 Checking for duplicate message counts...")
+    tasks_with_duplicates = 0
+    tasks_without_duplicates = 0
+
+    agent_type_str = "generalist" if is_generalist else "specialist"
+
+    for task_id, log_entries in deduped_task_logs.items():
+        message_counts = [
+            len(entry.get("inputs", {}).get("messages", [])) for entry in log_entries
+        ]
+        # Check if there are duplicate counts
+        if len(message_counts) != len(set(message_counts)):
+            tasks_with_duplicates += 1
+            if verbose:
+                print(
+                    f"      ⚠️  Task {task_id} has duplicate message counts: {message_counts}"
+                )
+
+            # Write duplicate entries to files
+            duplicate_dir = os.path.join(
+                "duplicates", agent_type_str, file_name, task_id
+            )
+            os.makedirs(duplicate_dir, exist_ok=True)
+
+            # Group entries by message count to identify duplicates
+            count_to_entries = {}
+            for entry in log_entries:
+                msg_count = len(entry.get("inputs", {}).get("messages", []))
+                if msg_count not in count_to_entries:
+                    count_to_entries[msg_count] = []
+                count_to_entries[msg_count].append(entry)
+
+            # Write files for duplicate message counts
+            for msg_count, entries in count_to_entries.items():
+                if (
+                    len(entries) > 1
+                ):  # Only write if there are duplicates for this count
+                    for idx, entry in enumerate(entries):
+                        output_file = os.path.join(
+                            duplicate_dir, f"messages_len_{msg_count}_idx_{idx}.log"
+                        )
+                        messages = entry.get("inputs", {}).get("messages", [])
+
+                        with open(output_file, "w") as f:
+                            for i, msg in enumerate(messages):
+                                role = msg.get("role", "unknown")
+                                content = msg.get("content", "")
+
+                                # Extract text from content
+                                if isinstance(content, list):
+                                    content_str = "\n".join(
+                                        [
+                                            item.get("text", "")
+                                            if isinstance(item, dict)
+                                            else str(item)
+                                            for item in content
+                                        ]
+                                    )
+                                else:
+                                    content_str = (
+                                        "" if content is None else str(content)
+                                    )
+
+                                f.write(f"# Role: {role}\n")
+                                f.write(f"# Message {i + 1}:\n")
+                                f.write(content_str)
+                                f.write("\n\n")
+        else:
+            tasks_without_duplicates += 1
+
+    total_tasks_checked = tasks_with_duplicates + tasks_without_duplicates
+    if total_tasks_checked > 0:
+        duplicate_percentage = (tasks_with_duplicates / total_tasks_checked) * 100
+        print(
+            f"      ✅ Tasks without duplicate counts: {tasks_without_duplicates}/{total_tasks_checked} ({100 - duplicate_percentage:.1f}%)"
+        )
+        print(
+            f"      ⚠️  Tasks with duplicates: {tasks_with_duplicates}/{total_tasks_checked} ({duplicate_percentage:.1f}%)"
+        )
+        if tasks_with_duplicates > 0:
+            print(
+                f"      📁 Duplicate entries written to: duplicates/{agent_type_str}/{file_name}/"
+            )
+    else:
+        print(f"\n   📊 No tasks to check for duplicates")
+
     # Process tasks
     agent_runs = []
+    transcript_check_results = []
     processed = 0
 
     for task_id, log_entries in deduped_task_logs.items():
@@ -809,17 +1374,49 @@ def process_usaco_file(
         # Process without try-catch - let errors stop the pipeline
         if verbose:
             print(f"   🔧 Task has {len(log_entries)} log entries")
+
+        # Prepare eval_data with results and raw_eval_results
+        eval_data = {"results": results_data, "raw_eval_results": raw_eval_results}
+
         agent_run = hal_usaco_to_docent_usaco(
             log_entries,
             model_name,
-            results_data,
+            eval_data,
             config_data,
             is_generalist=is_generalist,
             verbose=verbose,
         )
         agent_runs.append(agent_run)
+
+        # Check if largest entry is subset of transcript
+        transcript_messages = agent_run.transcripts[0].messages
+        check_result = check_transcript_contains_largest_entry(
+            log_entries,
+            transcript_messages,
+            task_id=task_id,
+            file_name=file_name,
+            is_generalist=is_generalist,
+            verbose=verbose,
+        )
+        transcript_check_results.append(check_result)
+
         processed += 1
         print(f"   {'-' * 70}")
+
+    # Print transcript check summary
+    if transcript_check_results:
+        tasks_passed = sum(1 for r in transcript_check_results if r["passed"])
+        tasks_failed = len(transcript_check_results) - tasks_passed
+        total_tasks = len(transcript_check_results)
+        pass_percentage = (tasks_passed / total_tasks) * 100 if total_tasks > 0 else 0
+
+        print(f"\n   📊 Transcript Check Results:")
+        print(
+            f"      ✅ Tasks passed (largest entry ⊆ transcript): {tasks_passed}/{total_tasks} ({pass_percentage:.1f}%)"
+        )
+        print(
+            f"      ❌ Tasks failed: {tasks_failed}/{total_tasks} ({100 - pass_percentage:.1f}%)"
+        )
 
     print(f"   ✅ Successfully processed {len(agent_runs)} agent runs")
     return agent_runs
@@ -850,7 +1447,7 @@ def process_all_usaco_files(
         List of all AgentRun objects
     """
     from contextlib import redirect_stdout
-    
+
     all_agent_runs = []
 
     # Find all JSON files in the directory matching the pattern
@@ -875,15 +1472,15 @@ def process_all_usaco_files(
         log_filename = json_file.replace("_UPLOAD.json", ".log")
         log_path = os.path.join(log_dir, log_filename)
         os.makedirs(log_dir, exist_ok=True)
-        
+
         print(f"\n📄 Processing file: {json_file} -> {log_path}")
-        
-        with open(log_path, 'w') as log_file:
+
+        with open(log_path, "w") as log_file:
             with redirect_stdout(log_file):
                 print(f"{'=' * 80}")
                 print(f"Processing file: {json_file}")
                 print(f"{'=' * 80}")
-                
+
                 file_path = os.path.join(directory, json_file)
                 agent_runs = process_usaco_file(
                     file_path,
@@ -893,7 +1490,7 @@ def process_all_usaco_files(
                     verbose=verbose,
                 )
                 all_agent_runs.extend(agent_runs)
-                
+
                 print(f"\n✅ Processed {len(agent_runs)} agent runs from this file")
 
     print(f"\n✅ Total agent runs collected: {len(all_agent_runs)}")
@@ -944,7 +1541,7 @@ def main():
     script_dir = os.path.dirname(os.path.abspath(__file__))
     project_root = os.path.dirname(script_dir)  # Go up one level
     directory = os.path.join(project_root, "hal_traces", "uscao_data")
-    
+
     if args.log_dir:
         log_dir = args.log_dir
     else:
