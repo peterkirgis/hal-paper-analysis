@@ -15,6 +15,7 @@ import logging
 import os
 import re
 from datetime import datetime
+from dateutil import parser as dateutil_parser
 from typing import Any, Dict, List
 
 from dotenv import load_dotenv
@@ -31,6 +32,12 @@ from docent.data_models.chat import (
     UserMessage,
 )
 from pydantic import BaseModel, Field
+
+from common_utils import (
+    parse_message_dict_to_chat_message,
+    deduplicate_log_entries,
+    check_transcript_contains_largest_entry,
+)
 
 
 # ============================================================================
@@ -83,6 +90,33 @@ class AssistantBenchMetadata(BaseModel):
 # ============================================================================
 
 
+def normalize_generalist_content(content: str) -> str:
+    """
+    Normalize generalist agent content by removing <end_code> and tool call metadata.
+    
+    For generalist agents:
+    - Entry content: may or may not have <end_code>
+    - Transcript content: may have <end_code> at the end
+    
+    We need to normalize both by removing <end_code> markers and anything after them.
+    
+    Args:
+        content: Raw content string from log entry or transcript
+    
+    Returns:
+        Normalized content string
+    """
+    # Remove <end_code> and everything after it (including "Calling tools:" section)
+    if "<end_code>" in content:
+        content = content.split("<end_code>")[0]
+    
+    # Also handle the "Calling tools:" pattern even if <end_code> is missing
+    if "Calling tools:" in content:
+        content = content.split("Calling tools:")[0]
+    
+    return content.strip()
+
+
 def extract_tool_calls(input_str: str) -> List[Dict[str, Any]] | None:
     """
     Extract tool calls from assistant message content.
@@ -121,6 +155,18 @@ def parse_message_dict_to_chat_message(
     function_name = msg.get("name")  # For tool messages
     thinking_blocks = msg.get("thinking_blocks", [])
 
+    # Check for DeepSeek <think> blocks in content and extract them as reasoning
+    reasoning_content = None
+    if isinstance(content_raw, str) and "<think>" in content_raw and "</think>" in content_raw:
+        # Extract the thinking content
+        think_start = content_raw.find("<think>")
+        think_end = content_raw.find("</think>")
+        if think_start != -1 and think_end != -1:
+            reasoning_content = content_raw[think_start + len("<think>"):think_end].strip()
+            # Remove the <think></think> block from the main content
+            content_raw = content_raw[:think_start] + content_raw[think_end + len("</think>"):]
+            content_raw = content_raw.strip()
+
     # Handle content that might be a list of dicts with 'type' and 'text'
     if isinstance(content_raw, list):
         # Extract text from list of content objects
@@ -142,7 +188,11 @@ def parse_message_dict_to_chat_message(
     elif role == "assistant":
         # Build content list with reasoning and text
         content_list = []
-
+        
+        # Add DeepSeek reasoning as ContentReasoning (if extracted)
+        if reasoning_content:
+            content_list.append(ContentReasoning(reasoning=reasoning_content))
+        
         # Add thinking blocks as ContentReasoning
         if thinking_blocks:
             for block in thinking_blocks:
@@ -150,11 +200,11 @@ def parse_message_dict_to_chat_message(
                     thinking_text = block.get("thinking", "")
                     if thinking_text:
                         content_list.append(ContentReasoning(reasoning=thinking_text))
-
+        
         # Add main content as ContentText
         if content:
             content_list.append(ContentText(text=content))
-
+        
         # Check if there are tool calls in the content
         extracted_tool_calls = extract_tool_calls(content)
 
@@ -167,7 +217,7 @@ def parse_message_dict_to_chat_message(
                 func_data = tc.get("function", {})
                 func_name = func_data.get("name", "")
                 func_args = func_data.get("arguments", "")
-
+                
                 # Convert arguments to dict if it's a string
                 if isinstance(func_args, str):
                     # Wrap the string in a dict with "code" key for code-based tools
@@ -224,8 +274,14 @@ def reconstruct_conversation_from_log_entries_specialist(
     """
     Reconstruct conversation for SPECIALIST agents (single message increments).
 
-    For specialist agents, each turn adds exactly one user message and one assistant response.
-    We simply take the last message from inputs and add the assistant's output.
+    For specialist agents:
+    - First entry: Add ALL messages from inputs, then add the output
+    - Subsequent entries: Add only the LAST input message and the output
+    
+    This is because:
+    - First entry contains the full initial context (system message + first user message)
+    - Each subsequent entry adds the previous assistant response + new user message in inputs,
+      but we only want to add the NEW user message (the last one)
 
     Args:
         log_entries: List of log entry dictionaries sorted by created_timestamp
@@ -239,7 +295,7 @@ def reconstruct_conversation_from_log_entries_specialist(
 
     conversation = []
 
-    # For each entry, add the last input message and then the output
+    # Process each entry
     for idx, entry in enumerate(log_entries, start=1):
         entry_input_messages = entry.get("inputs", {}).get("messages", [])
 
@@ -249,22 +305,29 @@ def reconstruct_conversation_from_log_entries_specialist(
                 f"      Current conversation length before: {len(conversation)} messages"
             )
 
-        # Add the last message from entry inputs (the user message for this turn)
-        if entry_input_messages:
-            last_input_msg = entry_input_messages[-1]
+        # For the FIRST entry, add ALL messages from inputs (system + initial user message)
+        if idx == 1:
             if verbose:
-                print(f"      ✅ Adding last input message")
-                content_raw = last_input_msg.get("content", "")
-                if isinstance(content_raw, list) and len(content_raw) > 0:
-                    first_item = content_raw[0]
-                    if isinstance(first_item, dict):
-                        content_preview = str(first_item.get("text", ""))[:100]
+                print(f"      ✅ First entry - adding all {len(entry_input_messages)} input messages")
+            for msg in entry_input_messages:
+                conversation.append(parse_message_dict_to_chat_message(msg))
+        else:
+            # For SUBSEQUENT entries, add only the LAST input message (the new user message)
+            if entry_input_messages:
+                last_input_msg = entry_input_messages[-1]
+                if verbose:
+                    print(f"      ✅ Adding last input message (new user message)")
+                    content_raw = last_input_msg.get("content", "")
+                    if isinstance(content_raw, list) and len(content_raw) > 0:
+                        first_item = content_raw[0]
+                        if isinstance(first_item, dict):
+                            content_preview = str(first_item.get("text", ""))[:100]
+                        else:
+                            content_preview = str(first_item)[:100]
                     else:
-                        content_preview = str(first_item)[:100]
-                else:
-                    content_preview = str(content_raw)[:100]
-                print(f"      Content preview: {content_preview}")
-            conversation.append(parse_message_dict_to_chat_message(last_input_msg))
+                        content_preview = str(content_raw)[:100]
+                    print(f"      Content preview: {content_preview}")
+                conversation.append(parse_message_dict_to_chat_message(last_input_msg))
 
         # Get the output from this entry
         output = entry.get("output")
@@ -308,7 +371,7 @@ def reconstruct_conversation_from_log_entries_generalist(
 ) -> List[SystemMessage | UserMessage | AssistantMessage | ToolMessage]:
     """
     Reconstruct conversation for GENERALIST agents (can have multi-message gaps).
-
+    
     For generalist agents, there can be sudden jumps of 4+ messages at once (e.g., tool calls).
     We add all messages that are not already in the conversation, then add the output.
 
@@ -327,21 +390,21 @@ def reconstruct_conversation_from_log_entries_generalist(
     # For each entry, add all new messages not in conversation, then add output
     for idx, entry in enumerate(log_entries, start=1):
         entry_input_messages = entry.get("inputs", {}).get("messages", [])
-
+        
         if verbose:
             print(f"      Entry {idx}: {len(entry_input_messages)} messages in inputs")
             print(
                 f"      Current conversation length before: {len(conversation)} messages"
             )
-
+        
         # Calculate how many new messages to add
         num_existing = len(conversation)
         num_in_entry = len(entry_input_messages)
         num_new = num_in_entry - num_existing
-
+        
         if verbose:
             print(f"      New messages to add: {num_new}")
-
+        
         # Add all new messages that aren't in conversation yet
         if num_new > 0:
             new_messages = entry_input_messages[num_existing:]
@@ -360,26 +423,26 @@ def reconstruct_conversation_from_log_entries_generalist(
                         content_preview = str(content_raw)[:100]
                     print(f"         Message {i + 1} preview: {content_preview}")
                 conversation.append(parse_message_dict_to_chat_message(msg_dict))
-
+        
         # Get the output from this entry
         output = entry.get("output")
-
+        
         if verbose:
             print(f"      Output type={type(output)}, has_output={output is not None}")
-
+        
         # Skip entries without output
         if output is None:
             if verbose:
                 print(f"      ⚠️ Skipping - no output")
             continue
-
+            
         choices = output.get("choices", [])
-
+        
         if choices and len(choices) > 0:
             assistant_message = choices[0].get("message", {})
             assistant_content = assistant_message.get("content", "")
             thinking_blocks = assistant_message.get("thinking_blocks", [])
-
+            
             if verbose:
                 content_preview = str(assistant_content)[:100]
                 print(f"      ✅ Adding assistant output")
@@ -434,7 +497,7 @@ def hal_assistantbench_to_docent_assistantbench(
         print(
             f"   🔄 Reconstructing conversation for task {task_id} ({agent_type}) from {len(log_entries)} log entries"
         )
-
+    
     if is_generalist:
         messages = reconstruct_conversation_from_log_entries_generalist(
             log_entries, verbose=verbose
@@ -459,7 +522,7 @@ def hal_assistantbench_to_docent_assistantbench(
     results = eval_results_data
     successful_tasks = results.get("successful_tasks", [])
     failed_tasks = results.get("failed_tasks", [])
-
+    
     task_success = 1 if task_id in successful_tasks else 0
     accuracy = float(task_success)
 
@@ -505,7 +568,7 @@ def hal_assistantbench_to_docent_assistantbench(
 
     # Convert metadata to dict
     metadata_dict = metadata.model_dump()
-
+    
     transcript = Transcript(
         messages=messages,
         metadata=metadata_dict,
@@ -620,11 +683,16 @@ def deduplicate_log_entries(
             len(entry.get("inputs", {}).get("messages", []))
             for entry in removed_entries
         ]
+        removed_models = [
+            entry.get("inputs", {}).get("model", "unknown")
+            for entry in removed_entries
+        ]
         print(
             f"      Stage 2 (model filter): {len(second_stage_filtered)} entries (removed {len(first_stage_filtered) - len(second_stage_filtered)})"
         )
         if removed_msg_counts:
             print(f"         Removed entries had message counts: {removed_msg_counts}")
+            print(f"         Removed models: {removed_models}")
 
     if not second_stage_filtered:
         return []
@@ -640,9 +708,10 @@ def deduplicate_log_entries(
         by_length[msg_count].append(entry)
 
     # For each message count group, deduplicate by content
+    # When duplicates are found, prefer: 1) latest timestamp, 2) non-null output
     unique_entries = []
     for msg_count, entries in sorted(by_length.items()):
-        seen_signatures = set()
+        seen_signatures = {}  # signature -> entry
         for entry in entries:
             messages = entry.get("inputs", {}).get("messages", [])
 
@@ -669,9 +738,50 @@ def deduplicate_log_entries(
 
             signature = "||".join(signature_parts)
 
+            # If we haven't seen this signature, add it
             if signature not in seen_signatures:
-                seen_signatures.add(signature)
-                unique_entries.append(entry)
+                seen_signatures[signature] = entry
+            else:
+                # We have a duplicate - decide which one to keep
+                existing_entry = seen_signatures[signature]
+                
+                # Get output status
+                existing_has_output = existing_entry.get("output") is not None
+                current_has_output = entry.get("output") is not None
+                
+                # Priority 1: Prefer entries with output over those without
+                # Priority 2: Among entries with same output status, prefer latest timestamp
+                should_replace = False
+                
+                if current_has_output and not existing_has_output:
+                    # Current has output, existing doesn't - always replace
+                    should_replace = True
+                elif current_has_output == existing_has_output:
+                    # Both have same output status - compare timestamps
+                    existing_timestamp_str = existing_entry.get("created_timestamp", "")
+                    current_timestamp_str = entry.get("created_timestamp", "")
+                    
+                    # Parse timestamps for proper comparison
+                    try:
+                        existing_ts = dateutil_parser.parse(existing_timestamp_str) if existing_timestamp_str else None
+                        current_ts = dateutil_parser.parse(current_timestamp_str) if current_timestamp_str else None
+                        
+                        if current_ts and existing_ts and current_ts > existing_ts:
+                            should_replace = True
+                        elif current_ts and not existing_ts:
+                            # Current has valid timestamp, existing doesn't
+                            should_replace = True
+                    except (ValueError, TypeError):
+                        # If parsing fails, fall back to string comparison
+                        if current_timestamp_str > existing_timestamp_str:
+                            should_replace = True
+                # If existing has output and current doesn't, keep existing (don't replace)
+                
+                if should_replace:
+                    seen_signatures[signature] = entry
+        
+        # Add all unique entries (after deduplication) to the result
+        unique_entries.extend(seen_signatures.values())
 
     if verbose:
         removed_entries = [
@@ -699,6 +809,119 @@ def deduplicate_log_entries(
         )
 
     return unique_entries
+
+
+
+
+def sanity_check_log_entries(
+    log_entries: List[Dict[str, Any]],
+    task_id: str = "unknown",
+    verbose: bool = True,
+) -> Dict[str, Any]:
+    """
+    Sanity check: verify that entries with fewer messages are subsets of the entry with most messages.
+    
+    Args:
+        log_entries: List of log entries for a single task (after deduplication)
+        task_id: Task identifier for logging
+        verbose: Whether to print detailed information
+    
+    Returns:
+        Dictionary with sanity check results
+    """
+    if not log_entries:
+        return {"is_subset": True, "reason": "No entries to check"}
+    
+    if len(log_entries) == 1:
+        return {"is_subset": True, "reason": "Only one entry"}
+    
+    # Find entry with largest message count
+    max_entry = max(log_entries, key=lambda e: len(e.get("inputs", {}).get("messages", [])))
+    max_messages = max_entry.get("inputs", {}).get("messages", [])
+    max_count = len(max_messages)
+    
+    if verbose:
+        print(f"      Sanity Check - Largest entry has {max_count} messages")
+    
+    # Check if all other entries are subsets
+    is_valid = True
+    details = []
+    
+    for entry in log_entries:
+        messages = entry.get("inputs", {}).get("messages", [])
+        msg_count = len(messages)
+        
+        if msg_count == max_count:
+            continue  # Skip the max entry itself
+        
+        # Check if this entry's messages are a prefix subset of max_messages
+        is_subset = True
+        if msg_count > max_count:
+            is_subset = False
+            is_valid = False
+            details.append(f"Entry with {msg_count} messages > max {max_count}")
+        else:
+            # Check if first msg_count messages match
+            for i in range(msg_count):
+                entry_msg = messages[i]
+                max_msg = max_messages[i]
+                
+                # Compare role and content
+                if entry_msg.get("role") != max_msg.get("role"):
+                    is_subset = False
+                    is_valid = False
+                    details.append(f"Entry with {msg_count} messages - role mismatch at position {i}")
+                    break
+                
+                # Properly extract content (handle both string and list formats)
+                entry_content = entry_msg.get("content", "")
+                max_content = max_msg.get("content", "")
+                
+                # Extract text from content (same logic as in deduplicate_log_entries)
+                if isinstance(entry_content, list):
+                    entry_content_str = str(
+                        [
+                            item.get("text", "")
+                            if isinstance(item, dict)
+                            else str(item)
+                            for item in entry_content
+                        ]
+                    )
+                else:
+                    entry_content_str = str(entry_content)
+                
+                if isinstance(max_content, list):
+                    max_content_str = str(
+                        [
+                            item.get("text", "")
+                            if isinstance(item, dict)
+                            else str(item)
+                            for item in max_content
+                        ]
+                    )
+                else:
+                    max_content_str = str(max_content)
+                
+                if entry_content_str != max_content_str:
+                    is_subset = False
+                    is_valid = False
+                    details.append(f"Entry with {msg_count} messages - content mismatch at position {i}")
+                    break
+    
+    result = {
+        "is_subset": is_valid,
+        "max_message_count": max_count,
+        "total_entries": len(log_entries),
+        "details": details if not is_valid else []
+    }
+    
+    if verbose and not is_valid:
+        print(f"      ⚠️  Sanity check FAILED for task {task_id}")
+        for detail in details:
+            print(f"         - {detail}")
+    
+    return result
+
 
 
 def process_assistantbench_file(
@@ -770,7 +993,7 @@ def process_assistantbench_file(
     # Get the model name from config
     agent_args = config_data.get("agent_args", {})
     model_name = agent_args.get("model_name", "unknown")
-
+    
     # Normalize model name: remove provider prefixes
     original_model_name = model_name
     if model_name.startswith("gemini/"):
@@ -804,6 +1027,34 @@ def process_assistantbench_file(
     )
 
     # Process tasks
+
+    # Sanity check: verify entries are subsets (only for generalist agents)
+    if is_generalist:
+        print("\n   🔍 Running sanity checks on deduplicated entries...")
+        sanity_results = []
+        tasks_passed = 0
+        tasks_failed = 0
+        
+        for task_id, log_entries in deduped_task_logs.items():
+            result = sanity_check_log_entries(log_entries, task_id=task_id, verbose=verbose)
+            sanity_results.append(result)
+            if result["is_subset"]:
+                tasks_passed += 1
+            else:
+                tasks_failed += 1
+        
+        total_tasks = len(sanity_results)
+        if total_tasks > 0:
+            pass_percentage = (tasks_passed / total_tasks) * 100
+            print(f"\n   📊 Sanity Check Results:")
+            print(f"      ✅ Tasks passed: {tasks_passed}/{total_tasks} ({pass_percentage:.1f}%)")
+            print(f"      ❌ Tasks failed: {tasks_failed}/{total_tasks} ({100-pass_percentage:.1f}%)")
+        else:
+            print(f"\n   📊 No tasks to check")
+    else:
+        print("\n   ⏭️  Skipping sanity checks (specialist agent mode)")
+
+    # Process tasks
     agent_runs = []
     processed = 0
 
@@ -813,7 +1064,7 @@ def process_assistantbench_file(
 
         print(f"\n   {'-' * 70}")
         print(f"   🔧 Processing task_id: {task_id}")
-
+        
         # Print log entries info
         message_counts = [
             len(entry.get("inputs", {}).get("messages", [])) for entry in log_entries

@@ -7,6 +7,11 @@ This module contains shared functions used across multiple benchmark scripts:
 - parse_message_dict_to_chat_message: Convert message dicts to Docent ChatMessage objects
 - deduplicate_log_entries: Deduplicate log entries with multi-stage filtering
 - check_transcript_contains_largest_entry: Validate transcript against raw logs
+- load_and_organize_benchmark_file: Load, filter, and organize log entries from benchmark files
+- validate_agent_run: Validate AgentRun objects to catch serialization issues early
+- timestamp_based_ordering: Order log entries by timestamp and cut off when message counts decrease
+- get_entry_with_most_messages: Return the single log entry with the largest number of messages
+- resolve_duplicates_by_timestamp: Resolve duplicate message counts by keeping the latest timestamp
 """
 
 import ast
@@ -26,6 +31,40 @@ from docent.data_models.chat import (
     ToolMessage,
     UserMessage,
 )
+
+
+def validate_agent_run(agent_run, task_id: str = "unknown", verbose: bool = False):
+    """
+    Validate an AgentRun object to catch serialization issues early.
+
+    This validates that the AgentRun can be properly serialized and deserialized,
+    which helps catch issues before uploading to Docent.
+
+    Args:
+        agent_run: The AgentRun object to validate
+        task_id: Task ID for error reporting
+        verbose: Enable verbose logging
+
+    Raises:
+        Exception: If validation fails
+    """
+    try:
+        validated_dict = agent_run.model_dump()
+        from docent.data_models import AgentRun
+
+        AgentRun.model_validate(validated_dict)
+        if verbose:
+            print(f"   ✅ AgentRun validation passed for task {task_id}")
+    except Exception as e:
+        print(f"\n❌ AgentRun validation failed for task {task_id}:")
+        print(f"   Error: {e}")
+        if hasattr(agent_run, "transcripts") and agent_run.transcripts:
+            messages = agent_run.transcripts[0].messages
+            print(f"   Transcript has {len(messages)} messages:")
+            for i, msg in enumerate(messages):
+                msg_type = type(msg).__name__
+                print(f"      Message {i}: {msg_type}")
+        raise
 
 
 def normalize_generalist_content(content: str) -> str:
@@ -166,25 +205,46 @@ def parse_message_dict_to_chat_message(
         # Process all collected tool calls
         tool_call_objects = []
         if all_tool_calls:
-            for tc in all_tool_calls:
+            if verbose:
+                print(f"         Processing {len(all_tool_calls)} tool calls:")
+            for idx, tc in enumerate(all_tool_calls):
+                if verbose:
+                    print(f"         Tool call {idx}: {tc}")
+
                 tool_call_id = tc.get("id", "")
                 tool_type = tc.get("type", "function")
                 func_data = tc.get("function", {})
-                func_name = func_data.get("name", "")
-                func_args = func_data.get("arguments", "")
+                
+                # Handle None or missing function data
+                if func_data is None:
+                    func_data = {}
+                
+                func_name = func_data.get("name") or ""  # Ensure not None
+                func_args = func_data.get("arguments") or ""  # Ensure not None
+
+                if verbose:
+                    print(f"           - id: {tool_call_id}")
+                    print(f"           - function name: {func_name}")
+                    print(f"           - arguments type: {type(func_args)}")
+                    print(f"           - arguments value: {func_args}")
 
                 # Convert arguments to dict if it's a string
                 if isinstance(func_args, str):
                     # Try to parse JSON arguments, otherwise wrap in dict
                     try:
                         args_dict = json.loads(func_args)
+                        if not isinstance(args_dict, dict):
+                            # If parsed result is not a dict, wrap it
+                            args_dict = {"code": func_args}
                     except:
+                        # If JSON parsing fails, wrap the string in a dict
                         args_dict = {"code": func_args}
-                    args_str = func_args
+                elif isinstance(func_args, dict):
+                    # Already a dict, use as-is
+                    args_dict = func_args
                 else:
-                    args_dict = func_args if isinstance(func_args, dict) else {}
-                    # Convert dict to string for ToolCallContent
-                    args_str = str(func_args) if func_args else ""
+                    # Neither string nor dict (e.g., None, int, etc.), create empty dict
+                    args_dict = {}
 
                 # Create ToolCall with view (content must be string)
                 tool_call_obj = ToolCall(
@@ -200,7 +260,9 @@ def parse_message_dict_to_chat_message(
             # Use content_list if we have reasoning or if content is empty
             # When content is null/empty but we have tool calls, we need at least an empty list
             if verbose:
-                print(f"         → Returning AssistantMessage with {len(tool_call_objects)} tool call(s)")
+                print(
+                    f"         → Returning AssistantMessage with {len(tool_call_objects)} tool call(s)"
+                )
             if content_list:
                 return AssistantMessage(
                     content=content_list, tool_calls=tool_call_objects
@@ -213,9 +275,15 @@ def parse_message_dict_to_chat_message(
         else:
             # Use content_list if we have reasoning, otherwise use string content
             if verbose:
-                has_reasoning = any(isinstance(c, ContentReasoning) for c in content_list) if content_list else False
+                has_reasoning = (
+                    any(isinstance(c, ContentReasoning) for c in content_list)
+                    if content_list
+                    else False
+                )
                 if has_reasoning:
-                    print(f"         → Returning AssistantMessage with reasoning blocks")
+                    print(
+                        f"         → Returning AssistantMessage with reasoning blocks"
+                    )
                 else:
                     print(f"         → Returning AssistantMessage")
             if content_list and any(
@@ -747,7 +815,7 @@ def load_and_organize_benchmark_file(
         Dictionary containing:
         - file_name: Base filename without _UPLOAD.json
         - config_data: Configuration dictionary
-        - results_data: Results dictionary
+        - eval_results_data: Dictionary with 'results' and 'raw_eval_results' keys
         - deduped_task_logs: Dict of task_id -> list of deduplicated log entries
         - model_name: Normalized model name (last part after /)
         - model_name_full: Original full model name
@@ -762,17 +830,18 @@ def load_and_organize_benchmark_file(
     with open(file_path, "r") as f:
         data = json.load(f)
 
-    # Extract config and eval results
     config_data = data.get("config", {})
-    results_data = data.get("results", {})
+    eval_results_data = {
+        "results": data.get("results", {}),
+        "raw_eval_results": data.get("raw_eval_results", {}),
+    }
 
-    if not results_data:
+    if not eval_results_data["results"]:
         print("   ❌ No results found, skipping file")
         return None
 
     # Get unique task IDs from results.latencies
-    results = data.get("results", {})
-    latencies = results.get("latencies", {})
+    latencies = eval_results_data["results"].get("latencies", {})
     unique_task_ids = set(latencies.keys())
 
     print(f"   📊 Found {len(unique_task_ids)} unique task IDs in results.latencies")
@@ -880,7 +949,9 @@ def load_and_organize_benchmark_file(
             # Print timestamps for duplicate message counts
             print(f"      Timestamps for duplicate message counts:")
             for msg_count, entries in sorted(count_to_entries.items()):
-                if len(entries) > 1:  # Only print if there are duplicates for this count
+                if (
+                    len(entries) > 1
+                ):  # Only print if there are duplicates for this count
                     print(f"         Messages count {msg_count}:")
                     for idx, entry in enumerate(entries):
                         timestamp = entry.get("created_timestamp", "N/A")
@@ -888,31 +959,9 @@ def load_and_organize_benchmark_file(
 
             # Resolve duplicates based on timestamp if flag is set
             if timestamp_based_resolving:
-                from dateutil import parser as date_parser
-                
-                resolved_entries = []
-                for msg_count, entries in count_to_entries.items():
-                    if len(entries) > 1:
-                        # Sort by timestamp (latest first) and pick the latest
-                        sorted_entries = sorted(
-                            entries,
-                            key=lambda e: date_parser.parse(e.get("created_timestamp", "1970-01-01T00:00:00")),
-                            reverse=True
-                        )
-                        latest_entry = sorted_entries[0]
-                        resolved_entries.append(latest_entry)
-                        if verbose:
-                            print(f"         ⏰ Resolved duplicate for message count {msg_count}: keeping entry with timestamp {latest_entry.get('created_timestamp')}")
-                    else:
-                        resolved_entries.append(entries[0])
-                
-                # Update the deduplicated task logs with resolved entries
-                deduped_task_logs[task_id] = sorted(
-                    resolved_entries,
-                    key=lambda e: date_parser.parse(e.get("created_timestamp", "1970-01-01T00:00:00"))
+                deduped_task_logs[task_id] = resolve_duplicates_by_timestamp(
+                    log_entries, verbose=verbose
                 )
-                if verbose:
-                    print(f"         ✅ Resolved from {len(log_entries)} to {len(resolved_entries)} entries")
 
             # Write files for duplicate message counts
             for msg_count, entries in count_to_entries.items():
@@ -976,9 +1025,219 @@ def load_and_organize_benchmark_file(
     return {
         "file_name": file_name,
         "config_data": config_data,
-        "results_data": results_data,
+        "eval_results_data": eval_results_data,  # Contains both 'results' and 'raw_eval_results' from trace
         "deduped_task_logs": deduped_task_logs,
         "model_name": model_name,
         "model_name_full": model_name_full,
         "duplicate_stats": duplicate_stats,
     }
+
+
+def timestamp_based_ordering(
+    log_entries: List[Dict[str, Any]],
+    verbose: bool = False,
+) -> List[Dict[str, Any]]:
+    """
+    Order log entries by timestamp and cut off when message counts start decreasing.
+
+    This function:
+    1. Sorts all log entries by timestamp (ascending)
+    2. Tracks message counts: [2, 4, 6, 8, 10, 2, 4, ...]
+    3. Cuts off at the first decrease (returns [2, 4, 6, 8, 10])
+
+    This handles cases where an agent was restarted or had multiple runs,
+    keeping only the longest continuous increasing sequence.
+
+    Args:
+        log_entries: List of log entry dictionaries
+        verbose: Enable verbose logging
+
+    Returns:
+        Filtered list of log entries up to the first message count decrease
+    """
+    if not log_entries:
+        return []
+
+    if len(log_entries) <= 1:
+        return log_entries
+
+    from dateutil import parser as date_parser
+
+    # Sort entries by timestamp (ascending - oldest first)
+    sorted_entries = sorted(
+        log_entries,
+        key=lambda e: date_parser.parse(
+            e.get("created_timestamp", "1970-01-01T00:00:00")
+        ),
+    )
+
+    # Get message counts for each entry
+    message_counts = [
+        len(entry.get("inputs", {}).get("messages", [])) for entry in sorted_entries
+    ]
+
+    if verbose:
+        print(f"      📊 Message counts (timestamp-sorted): {message_counts}")
+
+    # Find the cutoff point - first time message count decreases
+    cutoff_index = len(sorted_entries)  # Default: keep all entries
+
+    for i in range(1, len(message_counts)):
+        if message_counts[i] <= message_counts[i - 1]:
+            # Message count decreased or stayed same - cut off here
+            cutoff_index = i
+            if verbose:
+                print(
+                    f"      ✂️  Cutoff at index {i}: count went from {message_counts[i - 1]} to {message_counts[i]}"
+                )
+            break
+
+    # Return entries up to (but not including) the cutoff point
+    filtered_entries = sorted_entries[:cutoff_index]
+
+    if verbose:
+        print(f"      ✅ Kept {len(filtered_entries)}/{len(sorted_entries)} entries")
+        if len(filtered_entries) < len(sorted_entries):
+            kept_counts = message_counts[:cutoff_index]
+            dropped_counts = message_counts[cutoff_index:]
+            print(f"         Kept message counts: {kept_counts}")
+            print(f"         Dropped message counts: {dropped_counts}")
+
+    return filtered_entries
+
+
+def get_entry_with_most_messages(
+    log_entries: List[Dict[str, Any]],
+    verbose: bool = False,
+) -> List[Dict[str, Any]]:
+    """
+    Return the single log entry with the largest number of messages.
+
+    This function is useful when you want to keep only the most complete entry,
+    for example when dealing with agent restarts where you want the longest run.
+
+    Args:
+        log_entries: List of log entry dictionaries
+        verbose: Enable verbose logging
+
+    Returns:
+        List containing only the entry with the most messages (single-element list)
+        Returns empty list if input is empty
+    """
+    if not log_entries:
+        return []
+
+    if len(log_entries) == 1:
+        return log_entries
+
+    # Find entry with maximum number of messages
+    max_entry = None
+    max_message_count = -1
+
+    for entry in log_entries:
+        message_count = len(entry.get("inputs", {}).get("messages", []))
+        if message_count > max_message_count:
+            max_message_count = message_count
+            max_entry = entry
+
+    if verbose:
+        all_counts = [len(e.get("inputs", {}).get("messages", [])) for e in log_entries]
+        print(f"      📊 Message counts in all entries: {all_counts}")
+        print(f"      ✅ Selected entry with {max_message_count} messages")
+        if len(log_entries) > 1:
+            print(f"      🗑️  Dropped {len(log_entries) - 1} entries")
+
+    return [max_entry] if max_entry else []
+
+
+def resolve_duplicates_by_timestamp(
+    log_entries: List[Dict[str, Any]],
+    verbose: bool = False,
+) -> List[Dict[str, Any]]:
+    """
+    Resolve duplicate message counts by keeping the entry with the latest timestamp.
+
+    When multiple log entries have the same message count (e.g., two entries with 4 messages),
+    this function keeps only the entry with the latest timestamp for each duplicate count.
+
+    This is useful for handling agent restarts or retries where the same message count
+    appears multiple times.
+
+    Args:
+        log_entries: List of log entry dictionaries
+        verbose: Enable verbose logging
+
+    Returns:
+        List of log entries with duplicates resolved (sorted by timestamp)
+    """
+    if not log_entries:
+        return []
+
+    if len(log_entries) <= 1:
+        return log_entries
+
+    from dateutil import parser as date_parser
+
+    # Group entries by message count
+    count_to_entries = {}
+    for entry in log_entries:
+        msg_count = len(entry.get("inputs", {}).get("messages", []))
+        if msg_count not in count_to_entries:
+            count_to_entries[msg_count] = []
+        count_to_entries[msg_count].append(entry)
+
+    if verbose:
+        duplicate_counts = [
+            count for count, entries in count_to_entries.items() if len(entries) > 1
+        ]
+        if duplicate_counts:
+            print(f"      🔍 Found duplicate message counts: {duplicate_counts}")
+        else:
+            print(f"      ✅ No duplicate message counts found")
+
+    # Resolve duplicates by keeping the latest timestamp
+    resolved_entries = []
+    for msg_count, entries in count_to_entries.items():
+        if len(entries) > 1:
+            # Sort by timestamp (latest first) and pick the latest
+            sorted_entries = sorted(
+                entries,
+                key=lambda e: date_parser.parse(
+                    e.get("created_timestamp", "1970-01-01T00:00:00")
+                ),
+                reverse=True,
+            )
+            latest_entry = sorted_entries[0]
+            resolved_entries.append(latest_entry)
+            if verbose:
+                timestamps = [e.get("created_timestamp") for e in sorted_entries]
+                print(
+                    f"         ⏰ Resolved duplicate for message count {msg_count}: keeping entry with timestamp {latest_entry.get('created_timestamp')}"
+                )
+                print(f"            All timestamps: {timestamps}")
+                print(f"            Dropped {len(entries) - 1} duplicate(s)")
+        else:
+            resolved_entries.append(entries[0])
+
+    # Sort resolved entries by timestamp (oldest first)
+    resolved_entries = sorted(
+        resolved_entries,
+        key=lambda e: date_parser.parse(
+            e.get("created_timestamp", "1970-01-01T00:00:00")
+        ),
+    )
+
+    if verbose:
+        print(
+            f"      ✅ Resolved from {len(log_entries)} to {len(resolved_entries)} entries"
+        )
+        original_counts = [
+            len(e.get("inputs", {}).get("messages", [])) for e in log_entries
+        ]
+        resolved_counts = [
+            len(e.get("inputs", {}).get("messages", [])) for e in resolved_entries
+        ]
+        print(f"         Original message counts: {original_counts}")
+        print(f"         Resolved message counts: {resolved_counts}")
+
+    return resolved_entries

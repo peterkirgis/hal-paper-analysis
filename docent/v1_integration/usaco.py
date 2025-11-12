@@ -37,6 +37,7 @@ from common_utils import (
     parse_message_dict_to_chat_message,
     deduplicate_log_entries,
     check_transcript_contains_largest_entry,
+    load_and_organize_benchmark_file,
 )
 
 
@@ -373,7 +374,8 @@ def reconstruct_conversation_from_log_entries_generalist(
 def hal_usaco_to_docent_usaco(
     log_entries: List[Dict[str, Any]],
     model_name: str,
-    eval_data: Dict[str, Any],
+    raw_eval_results: Dict[str, Any],
+    eval_results_data: Dict[str, Any],
     config_data: Dict[str, Any],
     is_generalist: bool = False,
     verbose: bool = False,
@@ -384,7 +386,8 @@ def hal_usaco_to_docent_usaco(
     Args:
         log_entries: List of log entry dictionaries for the same task_id (sorted by timestamp)
         model_name: The model name to assert against the log entries
-        eval_data: Dict containing "results" and "raw_eval_results"
+        raw_eval_results: Raw evaluation results dictionary
+        eval_results_data: Evaluation results containing task results and metadata
         config_data: Configuration data for the run
         is_generalist: Whether this is a generalist agent (affects conversation reconstruction)
         verbose: Enable verbose logging
@@ -394,10 +397,13 @@ def hal_usaco_to_docent_usaco(
     """
     assert len(log_entries) > 0
     first_entry = log_entries[0]
-    entry_model = first_entry["inputs"]["model"]
+    entry_model_full = first_entry["inputs"]["model"]
+    entry_model = entry_model_full.split("/")[-1]
     if entry_model != model_name:
         if verbose:
-            print(f"   ⚠️  Model mismatch: expected '{model_name}', got '{entry_model}'")
+            print(
+                f"   ⚠️  Model mismatch: expected '{model_name}', got '{entry_model}' (from '{entry_model_full}')"
+            )
         assert entry_model == model_name
     task_id = first_entry["weave_task_id"]
 
@@ -429,9 +435,8 @@ def hal_usaco_to_docent_usaco(
     budget = agent_args.get("budget")
 
     # Determine task success from successful_tasks and failed_tasks lists
-    results = eval_data.get("results", {})
-    successful_tasks = results.get("successful_tasks", [])
-    failed_tasks = results.get("failed_tasks", [])
+    successful_tasks = eval_results_data.get("successful_tasks", [])
+    failed_tasks = eval_results_data.get("failed_tasks", [])
 
     task_success = 1 if task_id in successful_tasks else 0
     accuracy = float(task_success)
@@ -444,7 +449,6 @@ def hal_usaco_to_docent_usaco(
 
     # Extract test results from raw_eval_results["rdict"][task_id]
     # Note: rdict[task_id] is a list, we take the first element
-    raw_eval_results = eval_data.get("raw_eval_results", {})
     rdict = raw_eval_results.get("rdict", {})
     task_eval_list = rdict.get(task_id, [])
     task_eval_data = task_eval_list[0] if task_eval_list else {}
@@ -518,184 +522,33 @@ def process_usaco_file(
         file_path: Path to the JSON file
         max_tasks: Maximum number of tasks to process (for dry runs)
         target_first_message_prefix: The expected first message prefix for filtering (optional)
+        is_generalist: Whether this is a generalist agent (affects conversation reconstruction)
+        verbose: Enable verbose logging
 
     Returns:
         List of AgentRun objects
     """
-    print(f"\n📂 Processing file: {os.path.basename(file_path)}")
-
-    with open(file_path, "r") as f:
-        data = json.load(f)
-
-    # Extract config and eval results
-    config_data = data.get("config", {})
-    results_data = data.get("results", {})
-    raw_eval_results = data.get("raw_eval_results", {})
-
-    if not results_data:
-        print("   ❌ No results found, skipping file")
-        return []
-
-    # Get unique task IDs from results.latencies
-    results = data.get("results", {})
-    latencies = results.get("latencies", {})
-    unique_task_ids = set(latencies.keys())
-
-    print(f"   📊 Found {len(unique_task_ids)} unique task IDs in results.latencies")
-
-    # Organize logs by task_id - each task may have multiple log entries
-    logs = data.get("raw_logging_results", [])
-    task_logs_dict = {}  # task_id -> list of log entries
-
-    for log_entry in logs:
-        task_id = log_entry.get("weave_task_id")
-        if task_id and task_id in unique_task_ids:  # Only include if in latencies
-            if task_id not in task_logs_dict:
-                task_logs_dict[task_id] = []
-            task_logs_dict[task_id].append(log_entry)
-
-    # Sort log entries by timestamp for each task
-    for task_id in task_logs_dict:
-        task_logs_dict[task_id].sort(
-            key=lambda x: x.get("created_timestamp", ""), reverse=False
-        )
-
-    print(f"   📊 Found {len(task_logs_dict)} tasks with log entries")
-
-    # Debug: Print info for each task
-    for task_id, log_entries in sorted(task_logs_dict.items())[:5]:  # Show first 5
-        print(f"   🔍 Task {task_id}: {len(log_entries)} log entries")
-        for i, entry in enumerate(log_entries):
-            messages = entry.get("inputs", {}).get("messages", [])
-            print(f"      - Log {i + 1}: {len(messages)} messages in inputs")
-    if len(task_logs_dict) > 5:
-        print(f"   ... and {len(task_logs_dict) - 5} more tasks")
-
-    # Get the model name from config
-    agent_args = config_data.get("agent_args", {})
-    model_name = agent_args.get("model_name", "unknown")
-
-    # Normalize model name: remove provider prefixes
-    original_model_name = model_name
-    if model_name.startswith("gemini/"):
-        model_name = model_name.replace("gemini/", "")
-        print(
-            f"   🔧 Normalized model name from '{original_model_name}' to: '{model_name}'"
-        )
-    elif model_name.startswith("together_ai/"):
-        model_name = model_name.replace("together_ai/", "")
-        print(
-            f"   🔧 Normalized model name from '{original_model_name}' to: '{model_name}'"
-        )
-
-    # Deduplicate log entries for each task through all three filtering stages
-    deduped_task_logs = {}
-    print("\n   🔄 Deduplicating log entries for each task...")
-
-    file_name = os.path.basename(file_path).replace("_UPLOAD.json", "")
-
-    for task_id, log_entries in task_logs_dict.items():
-        deduped_entries = deduplicate_log_entries(
-            log_entries,
-            model_name,
-            target_first_message_prefix,
-            task_id=task_id,
-            file_name=file_name,
-            verbose=True,
-        )
-        if deduped_entries:
-            deduped_task_logs[task_id] = deduped_entries
-
-    print(
-        f"\n   📊 Final result: {len(deduped_task_logs)} tasks with deduplicated log entries"
+    result = load_and_organize_benchmark_file(
+        file_path=file_path,
+        target_first_message_prefix=target_first_message_prefix,
+        is_generalist=is_generalist,
+        verbose=verbose,
+        timestamp_based_resolving=False,
     )
 
-    # Check for duplicate message counts in deduplicated entries
-    print("\n   🔍 Checking for duplicate message counts...")
-    tasks_with_duplicates = 0
-    tasks_without_duplicates = 0
+    if result is None:
+        return []
 
-    agent_type_str = "generalist" if is_generalist else "specialist"
+    # Extract results from the common loader
+    file_name = result["file_name"]
+    config_data = result["config_data"]
+    eval_results_data_wrapper = result["eval_results_data"]
+    deduped_task_logs = result["deduped_task_logs"]
+    model_name = result["model_name"]
 
-    for task_id, log_entries in deduped_task_logs.items():
-        message_counts = [
-            len(entry.get("inputs", {}).get("messages", [])) for entry in log_entries
-        ]
-        # Check if there are duplicate counts
-        if len(message_counts) != len(set(message_counts)):
-            tasks_with_duplicates += 1
-            if verbose:
-                print(
-                    f"      ⚠️  Task {task_id} has duplicate message counts: {message_counts}"
-                )
-
-            # Write duplicate entries to files
-            duplicate_dir = os.path.join(
-                "duplicates", agent_type_str, file_name, task_id
-            )
-            os.makedirs(duplicate_dir, exist_ok=True)
-
-            # Group entries by message count to identify duplicates
-            count_to_entries = {}
-            for entry in log_entries:
-                msg_count = len(entry.get("inputs", {}).get("messages", []))
-                if msg_count not in count_to_entries:
-                    count_to_entries[msg_count] = []
-                count_to_entries[msg_count].append(entry)
-
-            # Write files for duplicate message counts
-            for msg_count, entries in count_to_entries.items():
-                if (
-                    len(entries) > 1
-                ):  # Only write if there are duplicates for this count
-                    for idx, entry in enumerate(entries):
-                        output_file = os.path.join(
-                            duplicate_dir, f"messages_len_{msg_count}_idx_{idx}.log"
-                        )
-                        messages = entry.get("inputs", {}).get("messages", [])
-
-                        with open(output_file, "w") as f:
-                            for i, msg in enumerate(messages):
-                                role = msg.get("role", "unknown")
-                                content = msg.get("content", "")
-
-                                # Extract text from content
-                                if isinstance(content, list):
-                                    content_str = "\n".join(
-                                        [
-                                            item.get("text", "")
-                                            if isinstance(item, dict)
-                                            else str(item)
-                                            for item in content
-                                        ]
-                                    )
-                                else:
-                                    content_str = (
-                                        "" if content is None else str(content)
-                                    )
-
-                                f.write(f"# Role: {role}\n")
-                                f.write(f"# Message {i + 1}:\n")
-                                f.write(content_str)
-                                f.write("\n\n")
-        else:
-            tasks_without_duplicates += 1
-
-    total_tasks_checked = tasks_with_duplicates + tasks_without_duplicates
-    if total_tasks_checked > 0:
-        duplicate_percentage = (tasks_with_duplicates / total_tasks_checked) * 100
-        print(
-            f"      ✅ Tasks without duplicate counts: {tasks_without_duplicates}/{total_tasks_checked} ({100 - duplicate_percentage:.1f}%)"
-        )
-        print(
-            f"      ⚠️  Tasks with duplicates: {tasks_with_duplicates}/{total_tasks_checked} ({duplicate_percentage:.1f}%)"
-        )
-        if tasks_with_duplicates > 0:
-            print(
-                f"      📁 Duplicate entries written to: duplicates/{agent_type_str}/{file_name}/"
-            )
-    else:
-        print(f"\n   📊 No tasks to check for duplicates")
+    # Extract eval results from wrapper
+    raw_eval_results = eval_results_data_wrapper.get("raw_eval_results", {})
+    eval_results_data = eval_results_data_wrapper.get("results", {})
 
     # Process tasks
     agent_runs = []
@@ -719,14 +572,11 @@ def process_usaco_file(
         # Process without try-catch - let errors stop the pipeline
         if verbose:
             print(f"   🔧 Task has {len(log_entries)} log entries")
-
-        # Prepare eval_data with results and raw_eval_results
-        eval_data = {"results": results_data, "raw_eval_results": raw_eval_results}
-
         agent_run = hal_usaco_to_docent_usaco(
             log_entries,
             model_name,
-            eval_data,
+            raw_eval_results,
+            eval_results_data,
             config_data,
             is_generalist=is_generalist,
             verbose=verbose,

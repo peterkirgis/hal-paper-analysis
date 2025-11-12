@@ -317,6 +317,7 @@ def reconstruct_conversation_from_log_entries_generalist(
 def hal_swebench_to_docent_swebench(
     log_entries: List[Dict[str, Any]],
     model_name: str,
+    raw_eval_results: Dict[str, Any],
     eval_results_data: Dict[str, Any],
     config_data: Dict[str, Any],
     is_generalist: bool = False,
@@ -328,6 +329,7 @@ def hal_swebench_to_docent_swebench(
     Args:
         log_entries: List of log entry dictionaries for the same task_id (sorted by timestamp)
         model_name: The model name to assert against the log entries
+        raw_eval_results: Raw evaluation results dictionary
         eval_results_data: Evaluation results containing task results and metadata
         config_data: Configuration data for the run
         is_generalist: Whether this is a generalist agent (affects conversation reconstruction)
@@ -418,6 +420,7 @@ def hal_swebench_to_docent_swebench(
         scoring_metadata=None,
         repo=repo,
         issue_number=issue_number,
+        task_success=task_success,
     )
 
     # Convert metadata to dict
@@ -476,9 +479,13 @@ def process_swebench_file(
     # Extract results from the common loader
     file_name = result["file_name"]
     config_data = result["config_data"]
-    results_data = result["results_data"]
+    eval_results_data_wrapper = result["eval_results_data"]
     deduped_task_logs = result["deduped_task_logs"]
     model_name = result["model_name"]
+
+    # Extract eval results from wrapper
+    raw_eval_results = eval_results_data_wrapper.get("raw_eval_results", {})
+    eval_results_data = eval_results_data_wrapper.get("results", {})
 
     # Process tasks
     agent_runs = []
@@ -505,7 +512,8 @@ def process_swebench_file(
         agent_run = hal_swebench_to_docent_swebench(
             log_entries,
             model_name,
-            results_data,
+            raw_eval_results,
+            eval_results_data,
             config_data,
             is_generalist=is_generalist,
             verbose=verbose,

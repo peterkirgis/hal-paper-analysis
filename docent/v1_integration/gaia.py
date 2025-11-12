@@ -15,6 +15,7 @@ import logging
 import os
 import re
 from datetime import datetime
+from dateutil import parser as dateutil_parser
 from typing import Any, Dict, List
 
 from dotenv import load_dotenv
@@ -32,6 +33,16 @@ from docent.data_models.chat import (
 )
 from pydantic import BaseModel, Field
 
+from common_utils import (
+    parse_message_dict_to_chat_message,
+    deduplicate_log_entries,
+    check_transcript_contains_largest_entry,
+    load_and_organize_benchmark_file,
+    extract_tool_calls,
+    validate_agent_run,
+    get_entry_with_most_messages,
+)
+
 
 # ============================================================================
 # PATTERNS
@@ -41,41 +52,6 @@ GAIA_GENERALIST_PATTERN = r"gaia_hal_generalist_agent(.+?)_\d+_UPLOAD\.json$"
 GAIA_SPECIALIST_PATTERN = r"gaia_hf_open_deep_research(.+?)_\d+_UPLOAD\.json$"
 
 
-# ============================================================================
-# LOGGING SETUP
-# ============================================================================
-
-
-def setup_file_logger(log_dir: str, filename: str) -> logging.Logger:
-    """
-    Setup a logger that writes to a specific file.
-    
-    Args:
-        log_dir: Directory where log file should be created
-        filename: Base name of the file being processed (used for log filename)
-        
-    Returns:
-        Configured logger instance
-    """
-    os.makedirs(log_dir, exist_ok=True)
-    
-    log_filename = filename.replace("_UPLOAD.json", ".log")
-    log_path = os.path.join(log_dir, log_filename)
-    
-    logger = logging.getLogger(f"gaia_{filename}")
-    logger.setLevel(logging.INFO)
-    logger.handlers.clear()
-    
-    file_handler = logging.FileHandler(log_path, mode='w')
-    file_handler.setLevel(logging.INFO)
-    
-    formatter = logging.Formatter('%(message)s')
-    file_handler.setFormatter(formatter)
-    
-    logger.addHandler(file_handler)
-    logger.propagate = False
-    
-    return logger
 
 
 # ============================================================================
@@ -112,139 +88,6 @@ class GAIAMetadata(BaseModel):
 # ============================================================================
 
 
-def extract_tool_calls(input_str: str) -> List[Dict[str, Any]] | None:
-    """
-    Extract tool calls from assistant message content.
-
-    Args:
-        input_str: The message content to search for tool calls.
-
-    Returns:
-        List of parsed tool calls, or None if none found.
-    """
-    match = re.search(r"Calling tools:\s*(\[.*\])", input_str, re.DOTALL | re.MULTILINE)
-    if match:
-        try:
-            return ast.literal_eval(match.group(1))
-        except (ValueError, SyntaxError):
-            return None
-    return None
-
-
-def parse_message_dict_to_chat_message(
-    msg: Dict[str, Any],
-) -> SystemMessage | UserMessage | AssistantMessage | ToolMessage:
-    """
-    Convert a single message dictionary to a Docent ChatMessage object.
-
-    Args:
-        msg: Message dictionary with 'role' and 'content'
-
-    Returns:
-        ChatMessage object (SystemMessage, UserMessage, AssistantMessage, or ToolMessage)
-    """
-    role = msg.get("role", "user")
-    content_raw = msg.get("content", "")
-    tool_calls = msg.get("tool_calls")
-    tool_call_id = msg.get("tool_call_id")
-    function_name = msg.get("name")  # For tool messages
-    thinking_blocks = msg.get("thinking_blocks", [])
-
-    # Handle content that might be a list of dicts with 'type' and 'text'
-    if isinstance(content_raw, list):
-        # Extract text from list of content objects
-        content_parts = []
-        for item in content_raw:
-            if isinstance(item, dict):
-                content_parts.append(item.get("text", ""))
-            else:
-                content_parts.append(str(item))
-        content = "\n".join(content_parts)
-    else:
-        content = str(content_raw) if content_raw else ""
-
-    # Map role to Docent's proper message types
-    if role == "system":
-        return SystemMessage(content=content)
-    elif role == "user":
-        return UserMessage(content=[ContentText(text=content)])
-    elif role == "assistant":
-        # Build content list with reasoning and text
-        content_list = []
-
-        # Add thinking blocks as ContentReasoning
-        if thinking_blocks:
-            for block in thinking_blocks:
-                if isinstance(block, dict) and block.get("type") == "thinking":
-                    thinking_text = block.get("thinking", "")
-                    if thinking_text:
-                        content_list.append(ContentReasoning(reasoning=thinking_text))
-
-        # Add main content as ContentText
-        if content:
-            content_list.append(ContentText(text=content))
-
-        # Check if there are tool calls in the content
-        extracted_tool_calls = extract_tool_calls(content)
-
-        if extracted_tool_calls:
-            # Parse tool calls into ToolCall objects
-            tool_call_objects = []
-            for tc in extracted_tool_calls:
-                tool_call_id = tc.get("id", "")
-                tool_type = tc.get("type", "function")
-                func_data = tc.get("function", {})
-                func_name = func_data.get("name", "")
-                func_args = func_data.get("arguments", "")
-
-                # Convert arguments to dict if it's a string
-                if isinstance(func_args, str):
-                    # Wrap the string in a dict with "code" key for code-based tools
-                    args_dict = {"code": func_args}
-                    args_str = func_args
-                else:
-                    args_dict = func_args if isinstance(func_args, dict) else {}
-                    # Convert dict to string for ToolCallContent
-                    args_str = str(func_args) if func_args else ""
-
-                # Create ToolCall with view (content must be string)
-                tool_call_obj = ToolCall(
-                    id=tool_call_id,
-                    function=func_name,
-                    arguments=args_dict,
-                    view=ToolCallContent(format="markdown", content=args_str),
-                )
-                tool_call_objects.append(tool_call_obj)
-
-            # Use content_list if we have reasoning, otherwise use string content
-            if content_list and any(
-                isinstance(c, ContentReasoning) for c in content_list
-            ):
-                return AssistantMessage(
-                    content=content_list, tool_calls=tool_call_objects
-                )
-            else:
-                return AssistantMessage(content=content, tool_calls=tool_call_objects)
-        else:
-            # Use content_list if we have reasoning, otherwise use string content
-            if content_list and any(
-                isinstance(c, ContentReasoning) for c in content_list
-            ):
-                return AssistantMessage(content=content_list)
-            else:
-                return AssistantMessage(content=content)
-    elif role == "tool":
-        if tool_call_id and function_name:
-            return ToolMessage(
-                content=content, tool_call_id=tool_call_id, function=function_name
-            )
-        else:
-            # Fallback to assistant message if tool info is missing
-            return AssistantMessage(content=content)
-    else:
-        # Default to user message for unknown roles
-        return UserMessage(content=[ContentText(text=content)])
-
 
 def reconstruct_conversation_from_log_entries_specialist(
     log_entries: List[Dict[str, Any]],
@@ -253,8 +96,13 @@ def reconstruct_conversation_from_log_entries_specialist(
     """
     Reconstruct conversation for SPECIALIST agents (single message increments).
 
-    For specialist agents, each turn adds exactly one user message and one assistant response.
-    We simply take the last message from inputs and add the assistant's output.
+    For specialist agents:
+    - First entry contains the full context (system + all initial messages)
+    - Subsequent entries add one new user message + assistant response
+
+    Strategy:
+    - Use ALL messages from the first entry
+    - For subsequent entries, add only the last message from inputs (new user message) + output
 
     Args:
         log_entries: List of log entry dictionaries sorted by created_timestamp
@@ -268,8 +116,45 @@ def reconstruct_conversation_from_log_entries_specialist(
 
     conversation = []
 
-    # For each entry, add the last input message and then the output
-    for idx, entry in enumerate(log_entries, start=1):
+    # Process first entry: add ALL input messages
+    first_entry = log_entries[0]
+    first_entry_messages = first_entry.get("inputs", {}).get("messages", [])
+
+    if verbose:
+        print(
+            f"      Entry 1 (first): {len(first_entry_messages)} messages in inputs - adding ALL"
+        )
+
+    for msg in first_entry_messages:
+        conversation.append(parse_message_dict_to_chat_message(msg, verbose=verbose))
+
+    # Add first entry's output
+    output = first_entry.get("output")
+    if output is not None:
+        choices = output.get("choices", [])
+        if choices and len(choices) > 0:
+            assistant_message = choices[0].get("message", {})
+            assistant_content = assistant_message.get("content", "")
+            thinking_blocks = assistant_message.get("thinking_blocks", [])
+            tool_calls = assistant_message.get("tool_calls", [])
+
+            if verbose:
+                content_preview = str(assistant_content)[:100]
+                print(f"      ✅ Adding assistant output from entry 1")
+                print(f"      Assistant content preview: {content_preview}")
+                print(f"      Thinking blocks: {len(thinking_blocks)}")
+                print(f"      Tool calls: {len(tool_calls) if tool_calls else 0}")
+
+            output_msg_dict = {
+                "role": "assistant",
+                "content": assistant_content,
+                "thinking_blocks": thinking_blocks,
+                "tool_calls": tool_calls,
+            }
+            conversation.append(parse_message_dict_to_chat_message(output_msg_dict, verbose=verbose))
+
+    # Process subsequent entries: add only the LAST message from inputs + output
+    for idx, entry in enumerate(log_entries[1:], start=2):
         entry_input_messages = entry.get("inputs", {}).get("messages", [])
 
         if verbose:
@@ -278,11 +163,11 @@ def reconstruct_conversation_from_log_entries_specialist(
                 f"      Current conversation length before: {len(conversation)} messages"
             )
 
-        # Add the last message from entry inputs (the user message for this turn)
+        # Add the last message from entry inputs (the NEW user message for this turn)
         if entry_input_messages:
             last_input_msg = entry_input_messages[-1]
             if verbose:
-                print(f"      ✅ Adding last input message")
+                print(f"      ✅ Adding last input message (new user message)")
                 content_raw = last_input_msg.get("content", "")
                 if isinstance(content_raw, list) and len(content_raw) > 0:
                     first_item = content_raw[0]
@@ -293,7 +178,7 @@ def reconstruct_conversation_from_log_entries_specialist(
                 else:
                     content_preview = str(content_raw)[:100]
                 print(f"      Content preview: {content_preview}")
-            conversation.append(parse_message_dict_to_chat_message(last_input_msg))
+            conversation.append(parse_message_dict_to_chat_message(last_input_msg, verbose=verbose))
 
         # Get the output from this entry
         output = entry.get("output")
@@ -313,20 +198,23 @@ def reconstruct_conversation_from_log_entries_specialist(
             assistant_message = choices[0].get("message", {})
             assistant_content = assistant_message.get("content", "")
             thinking_blocks = assistant_message.get("thinking_blocks", [])
+            tool_calls = assistant_message.get("tool_calls", [])
 
             if verbose:
                 content_preview = str(assistant_content)[:100]
                 print(f"      ✅ Adding assistant output")
                 print(f"      Assistant content preview: {content_preview}")
                 print(f"      Thinking blocks: {len(thinking_blocks)}")
+                print(f"      Tool calls: {len(tool_calls) if tool_calls else 0}")
 
             # Add the assistant's output message
             output_msg_dict = {
                 "role": "assistant",
                 "content": assistant_content,
                 "thinking_blocks": thinking_blocks,
+                "tool_calls": tool_calls,
             }
-            conversation.append(parse_message_dict_to_chat_message(output_msg_dict))
+            conversation.append(parse_message_dict_to_chat_message(output_msg_dict, verbose=verbose))
 
     return conversation
 
@@ -388,7 +276,7 @@ def reconstruct_conversation_from_log_entries_generalist(
                     else:
                         content_preview = str(content_raw)[:100]
                     print(f"         Message {i + 1} preview: {content_preview}")
-                conversation.append(parse_message_dict_to_chat_message(msg_dict))
+                conversation.append(parse_message_dict_to_chat_message(msg_dict, verbose=verbose))
 
         # Get the output from this entry
         output = entry.get("output")
@@ -408,20 +296,23 @@ def reconstruct_conversation_from_log_entries_generalist(
             assistant_message = choices[0].get("message", {})
             assistant_content = assistant_message.get("content", "")
             thinking_blocks = assistant_message.get("thinking_blocks", [])
+            tool_calls = assistant_message.get("tool_calls", [])
 
             if verbose:
                 content_preview = str(assistant_content)[:100]
                 print(f"      ✅ Adding assistant output")
                 print(f"      Assistant content preview: {content_preview}")
                 print(f"      Thinking blocks: {len(thinking_blocks)}")
+                print(f"      Tool calls: {len(tool_calls) if tool_calls else 0}")
 
             # Add the assistant's output message
             output_msg_dict = {
                 "role": "assistant",
                 "content": assistant_content,
                 "thinking_blocks": thinking_blocks,
+                "tool_calls": tool_calls,
             }
-            conversation.append(parse_message_dict_to_chat_message(output_msg_dict))
+            conversation.append(parse_message_dict_to_chat_message(output_msg_dict, verbose=verbose))
 
     return conversation
 
@@ -450,12 +341,26 @@ def hal_gaia_to_docent_gaia(
     """
     assert len(log_entries) > 0
     first_entry = log_entries[0]
-    entry_model = first_entry["inputs"]["model"]
+    entry_model_full = first_entry["inputs"]["model"]
+    
+    # Split by '/' and take the last part for comparison
+    entry_model = entry_model_full.split('/')[-1] if '/' in entry_model_full else entry_model_full
+    
     if entry_model != model_name:
         if verbose:
-            print(f"   ⚠️  Model mismatch: expected '{model_name}', got '{entry_model}'")
-        assert entry_model == model_name
+            print(
+                f"   ⚠️  Model mismatch: expected '{model_name}', got '{entry_model}' (from '{entry_model_full}')"
+            )
+        assert entry_model == model_name, f"Model mismatch: expected '{model_name}', got '{entry_model}' (from '{entry_model_full}')"
     task_id = first_entry["weave_task_id"]
+
+    # Pick only the entry with the most messages (handles agent restarts)
+    if verbose:
+        print(f"   📏 Selecting entry with most messages for task {task_id}")
+    log_entries = get_entry_with_most_messages(log_entries, verbose=verbose)
+    
+    if verbose:
+        print(f"   📊 After selection: {len(log_entries)} entry(ies)")
 
     # Reconstruct the full conversation from all log entries
     if verbose:
@@ -557,184 +462,6 @@ def hal_gaia_to_docent_gaia(
 # FILE PROCESSING
 # ============================================================================
 
-
-def deduplicate_log_entries(
-    log_entries: List[Dict[str, Any]],
-    model_name: str,
-    target_first_message_prefix: str,
-    task_id: str = "unknown",
-    verbose: bool = True,
-) -> List[Dict[str, Any]]:
-    """
-    Deduplicate log entries through three filtering stages:
-    1. Filter by first message prefix
-    2. Filter by model name
-    3. Remove duplicate entries based on message content and role
-
-    Args:
-        log_entries: List of log entries for a single task
-        model_name: The model name to filter by
-        target_first_message_prefix: The expected first message prefix
-        task_id: Task ID for logging purposes
-        verbose: Whether to print detailed logging
-
-    Returns:
-        Deduplicated list of log entries
-    """
-    if not log_entries:
-        return []
-
-    if verbose:
-        print(f"\n   🔍 Processing {task_id}:")
-        print(f"      Initial: {len(log_entries)} log entries")
-        # Show message counts with entry numbers
-        for i, entry in enumerate(log_entries, start=1):
-            messages = entry.get("inputs", {}).get("messages", [])
-            entry_model = entry.get("inputs", {}).get("model", "unknown")
-            print(
-                f"         - Log {i}: {len(messages)} messages in inputs, model={entry_model}"
-            )
-
-    # Stage 1: Filter by first message prefix
-    first_stage_filtered = []
-    for log_entry in log_entries:
-        messages = log_entry.get("inputs", {}).get("messages", [])
-        if messages and len(messages) > 0:
-            first_message_content = messages[0].get("content", "")
-
-            # Handle content that might be a list of dicts with 'type' and 'text'
-            first_message_text = ""
-            if isinstance(first_message_content, list):
-                # Filter dicts with type="text" and extract the "text" field
-                text_dicts = [
-                    item
-                    for item in first_message_content
-                    if isinstance(item, dict) and item.get("type") == "text"
-                ]
-                if text_dicts:
-                    # Usually just one dict, take the first one
-                    first_message_text = text_dicts[0].get("text", "")
-            else:
-                first_message_text = str(first_message_content)
-
-            if first_message_text.startswith(target_first_message_prefix):
-                first_stage_filtered.append(log_entry)
-
-    if verbose:
-        removed_entries = [
-            entry for entry in log_entries if entry not in first_stage_filtered
-        ]
-        removed_msg_counts = [
-            len(entry.get("inputs", {}).get("messages", []))
-            for entry in removed_entries
-        ]
-        print(
-            f"      Stage 1 (prefix filter): {len(first_stage_filtered)} entries (removed {len(log_entries) - len(first_stage_filtered)})"
-        )
-        if removed_msg_counts:
-            print(f"         Removed entries had message counts: {removed_msg_counts}")
-
-    if not first_stage_filtered:
-        return []
-
-    # Stage 2: Filter by model name
-    second_stage_filtered = []
-    for log_entry in first_stage_filtered:
-        entry_model = log_entry.get("inputs", {}).get("model", "unknown")
-        if entry_model == model_name:
-            second_stage_filtered.append(log_entry)
-
-    if verbose:
-        removed_entries = [
-            entry
-            for entry in first_stage_filtered
-            if entry not in second_stage_filtered
-        ]
-        removed_msg_counts = [
-            len(entry.get("inputs", {}).get("messages", []))
-            for entry in removed_entries
-        ]
-        print(
-            f"      Stage 2 (model filter): {len(second_stage_filtered)} entries (removed {len(first_stage_filtered) - len(second_stage_filtered)})"
-        )
-        if removed_msg_counts:
-            print(f"         Removed entries had message counts: {removed_msg_counts}")
-
-    if not second_stage_filtered:
-        return []
-
-    # Stage 3: Remove duplicates based on content
-    # Group by message count, then deduplicate within each group
-    by_length = {}
-    for entry in second_stage_filtered:
-        messages = entry.get("inputs", {}).get("messages", [])
-        msg_count = len(messages)
-        if msg_count not in by_length:
-            by_length[msg_count] = []
-        by_length[msg_count].append(entry)
-
-    # For each message count group, deduplicate by content
-    unique_entries = []
-    for msg_count, entries in sorted(by_length.items()):
-        seen_signatures = set()
-        for entry in entries:
-            messages = entry.get("inputs", {}).get("messages", [])
-
-            # Create a signature from the messages (role + full content)
-            signature_parts = []
-            for msg in messages:
-                role = msg.get("role", "")
-                content = msg.get("content", "")
-
-                # Handle content that might be a list
-                if isinstance(content, list):
-                    content_str = str(
-                        [
-                            item.get("text", "")
-                            if isinstance(item, dict)
-                            else str(item)
-                            for item in content
-                        ]
-                    )
-                else:
-                    content_str = str(content)
-
-                signature_parts.append(f"{role}:{content_str}")
-
-            signature = "||".join(signature_parts)
-
-            if signature not in seen_signatures:
-                seen_signatures.add(signature)
-                unique_entries.append(entry)
-
-    if verbose:
-        removed_entries = [
-            entry for entry in second_stage_filtered if entry not in unique_entries
-        ]
-        removed_msg_counts = [
-            len(entry.get("inputs", {}).get("messages", []))
-            for entry in removed_entries
-        ]
-        print(
-            f"      Stage 3 (deduplication): {len(unique_entries)} entries (removed {len(second_stage_filtered) - len(unique_entries)})"
-        )
-        if removed_msg_counts:
-            print(f"         Removed entries had message counts: {removed_msg_counts}")
-        # Show final message counts with entry numbers
-        print(f"      Final deduplicated entries:")
-        for i, entry in enumerate(unique_entries, start=1):
-            messages = entry.get("inputs", {}).get("messages", [])
-            entry_model = entry.get("inputs", {}).get("model", "unknown")
-            print(
-                f"         - Log {i}: {len(messages)} messages in inputs, model={entry_model}"
-            )
-        print(
-            f"      ✅ Total removed: {len(log_entries) - len(unique_entries)} duplicate/filtered entries"
-        )
-
-    return unique_entries
-
-
 def process_gaia_file(
     file_path: str,
     max_tasks: int | None = None,
@@ -749,96 +476,37 @@ def process_gaia_file(
         file_path: Path to the JSON file
         max_tasks: Maximum number of tasks to process (for dry runs)
         target_first_message_prefix: The expected first message prefix for filtering (optional)
+        is_generalist: Whether this is a generalist agent (affects conversation reconstruction)
+        verbose: Enable verbose logging
 
     Returns:
         List of AgentRun objects
     """
-    print(f"\n📂 Processing file: {os.path.basename(file_path)}")
+    result = load_and_organize_benchmark_file(
+        file_path=file_path,
+        target_first_message_prefix=target_first_message_prefix,
+        is_generalist=is_generalist,
+        verbose=verbose,
+        timestamp_based_resolving=False,
+    )
 
-    with open(file_path, "r") as f:
-        data = json.load(f)
-
-    # Extract config and eval results
-    config_data = data.get("config", {})
-    results_data = data.get("results", {})
-
-    if not results_data:
-        print("   ❌ No results found, skipping file")
+    if result is None:
         return []
 
-    # Get unique task IDs from results.latencies
-    results = data.get("results", {})
-    latencies = results.get("latencies", {})
-    unique_task_ids = set(latencies.keys())
+    # Extract results from the common loader
+    file_name = result["file_name"]
+    config_data = result["config_data"]
+    eval_results_data_wrapper = result["eval_results_data"]
+    deduped_task_logs = result["deduped_task_logs"]
+    model_name = result["model_name"]
 
-    print(f"   📊 Found {len(unique_task_ids)} unique task IDs in results.latencies")
-
-    # Organize logs by task_id - each task may have multiple log entries
-    logs = data.get("raw_logging_results", [])
-    task_logs_dict = {}  # task_id -> list of log entries
-
-    for log_entry in logs:
-        task_id = log_entry.get("weave_task_id")
-        if task_id and task_id in unique_task_ids:  # Only include if in latencies
-            if task_id not in task_logs_dict:
-                task_logs_dict[task_id] = []
-            task_logs_dict[task_id].append(log_entry)
-
-    # Sort log entries by timestamp for each task
-    for task_id in task_logs_dict:
-        task_logs_dict[task_id].sort(
-            key=lambda x: x.get("created_timestamp", ""), reverse=False
-        )
-
-    print(f"   📊 Found {len(task_logs_dict)} tasks with log entries")
-
-    # Debug: Print info for each task
-    for task_id, log_entries in sorted(task_logs_dict.items())[:5]:  # Show first 5
-        print(f"   🔍 Task {task_id}: {len(log_entries)} log entries")
-        for i, entry in enumerate(log_entries):
-            messages = entry.get("inputs", {}).get("messages", [])
-            print(f"      - Log {i + 1}: {len(messages)} messages in inputs")
-    if len(task_logs_dict) > 5:
-        print(f"   ... and {len(task_logs_dict) - 5} more tasks")
-
-    # Get the model name from config
-    agent_args = config_data.get("agent_args", {})
-    model_name = agent_args.get("model_name", "unknown")
-
-    # Normalize model name: remove provider prefixes
-    original_model_name = model_name
-    if model_name.startswith("gemini/"):
-        model_name = model_name.replace("gemini/", "")
-        print(
-            f"   🔧 Normalized model name from '{original_model_name}' to: '{model_name}'"
-        )
-    elif model_name.startswith("together_ai/"):
-        model_name = model_name.replace("together_ai/", "")
-        print(
-            f"   🔧 Normalized model name from '{original_model_name}' to: '{model_name}'"
-        )
-
-    # Deduplicate log entries for each task through all three filtering stages
-    deduped_task_logs = {}
-    print("\n   🔄 Deduplicating log entries for each task...")
-
-    for task_id, log_entries in task_logs_dict.items():
-        deduped_entries = deduplicate_log_entries(
-            log_entries,
-            model_name,
-            target_first_message_prefix,
-            task_id=task_id,
-            verbose=True,
-        )
-        if deduped_entries:
-            deduped_task_logs[task_id] = deduped_entries
-
-    print(
-        f"\n   📊 Final result: {len(deduped_task_logs)} tasks with deduplicated log entries"
-    )
+    # Extract eval results from wrapper
+    raw_eval_results = eval_results_data_wrapper.get("raw_eval_results", {})
+    results_data = eval_results_data_wrapper.get("results", {})
 
     # Process tasks
     agent_runs = []
+    transcript_check_results = []
     processed = 0
 
     for task_id, log_entries in deduped_task_logs.items():
@@ -867,8 +535,32 @@ def process_gaia_file(
             verbose=verbose,
         )
         agent_runs.append(agent_run)
+        
+        # Check if largest entry is subset of transcript
+        transcript_messages = agent_run.transcripts[0].messages
+        check_result = check_transcript_contains_largest_entry(
+            log_entries,
+            transcript_messages,
+            task_id=task_id,
+            file_name=file_name,
+            is_generalist=is_generalist,
+            verbose=verbose,
+        )
+        transcript_check_results.append(check_result)
+        
         processed += 1
         print(f"   {'-' * 70}")
+
+    # Print transcript check summary
+    if transcript_check_results:
+        tasks_passed = sum(1 for r in transcript_check_results if r["passed"])
+        tasks_failed = len(transcript_check_results) - tasks_passed
+        total_tasks = len(transcript_check_results)
+        pass_percentage = (tasks_passed / total_tasks) * 100 if total_tasks > 0 else 0
+        
+        print(f"\n   📊 Transcript Check Results:")
+        print(f"      ✅ Tasks passed (largest entry ⊆ transcript): {tasks_passed}/{total_tasks} ({pass_percentage:.1f}%)")
+        print(f"      ❌ Tasks failed: {tasks_failed}/{total_tasks} ({100-pass_percentage:.1f}%)")
 
     print(f"   ✅ Successfully processed {len(agent_runs)} agent runs")
     return agent_runs
