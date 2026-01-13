@@ -200,7 +200,77 @@ def load_most_recent_df():
         regex=True
     )
     most_recent_df['model'] = most_recent_df['model'].str.strip('()')
-    
+
+    # Recalculate total_cost using model pricing
+    # Import DEFAULT_PRICING from the hal-frontend db.py
+    import sys
+    hal_frontend_path = Path(__file__).parent.parent / "hal-frontend" / "utils"
+    sys.path.insert(0, str(hal_frontend_path))
+    from db import DEFAULT_PRICING
+
+    # Create model name mapping to match DEFAULT_PRICING keys
+    # This maps the cleaned model name back to the full name with release date
+    MODEL_NAME_MAPPING = {
+        'o3 Medium': 'o3 Medium (April 2025)',
+        'GPT-4.1': 'GPT-4.1 (April 2025)',
+        'GPT-5 Medium': 'GPT-5 Medium (August 2025)',
+        'o4-mini High': 'o4-mini High (April 2025)',
+        'o4-mini Low': 'o4-mini Low (April 2025)',
+        'Claude-3.7 Sonnet': 'Claude-3.7 Sonnet (February 2025)',
+        'Claude-3.7 Sonnet High': 'Claude-3.7 Sonnet High (February 2025)',
+        'Claude Sonnet 4': 'Claude Sonnet 4 (May 2025)',
+        'Claude Sonnet 4 High': 'Claude Sonnet 4 High (May 2025)',
+        'Claude Sonnet 4.5': 'Claude Sonnet 4.5 (September 2025)',
+        'Claude Sonnet 4.5 High': 'Claude Sonnet 4.5 High (September 2025)',
+        'Claude Opus 4': 'Claude Opus 4 (May 2025)',
+        'Claude Opus 4 High': 'Claude Opus 4 High (May 2025)',
+        'Claude Opus 4.1': 'Claude Opus 4.1 (August 2025)',
+        'Claude Opus 4.1 High': 'Claude Opus 4.1 High (August 2025)',
+        'Claude Opus 4.5': 'Claude Opus 4.5 (November 2025)',
+        'Claude Opus 4.5 High': 'Claude Opus 4.5 High (November 2025)',
+        'Claude Haiku 4.5': 'Claude Haiku 4.5 (October 2025)',
+        'Claude Haiku 4.5 High': 'Claude Haiku 4.5 High (October 2025)',
+        'DeepSeek R1': 'DeepSeek R1 (January 2025)',
+        'DeepSeek V3': 'DeepSeek V3 (December 2024)',
+        'DeepSeek V3.1': 'DeepSeek V3.1 (August 2025)',
+        'Gemini 2.0 Flash': 'Gemini 2.0 Flash (February 2025)',
+        'Gemini 2.0 Flash High': 'Gemini 2.0 Flash High (February 2025)',
+        'Gemini 2.5 Pro Preview': 'Gemini 2.5 Pro Preview (March 2025)',
+        'Gemini 3 Pro Preview High': 'Gemini 3 Pro Preview High (November 2025)',
+        'GPT-OSS-120B': 'GPT-OSS-120B (August 2025)',
+        'GPT-OSS-120B High': 'GPT-OSS-120B High (August 2025)',
+    }
+
+    # Get unique models in the dataframe
+    unique_models = most_recent_df['model'].unique()
+
+    for model_name in unique_models:
+        if pd.isna(model_name):
+            continue
+
+        mask = most_recent_df['model'] == model_name
+
+        # Skip if no rows for this model
+        if not mask.any():
+            continue
+
+        # Get pricing key from mapping
+        pricing_key = MODEL_NAME_MAPPING.get(model_name, model_name)
+
+        if pricing_key in DEFAULT_PRICING:
+            pricing = DEFAULT_PRICING[pricing_key]
+            rate_in = pricing['prompt_tokens'] / 1_000_000  # Convert to per-token rate
+            rate_out = pricing['completion_tokens'] / 1_000_000
+
+            # Calculate cost where token data is available
+            token_mask = mask & most_recent_df['prompt_tokens'].notna() & most_recent_df['completion_tokens'].notna()
+
+            if token_mask.any():
+                most_recent_df.loc[token_mask, 'total_cost'] = (
+                    rate_in * most_recent_df.loc[token_mask, 'prompt_tokens'] +
+                    rate_out * most_recent_df.loc[token_mask, 'completion_tokens']
+                )
+
     return most_recent_df
 
 def load_paper_df():
@@ -241,7 +311,7 @@ def load_paper_df():
         'Claude Opus 4.1 High': 'Claude Opus 4.1 High (August 2025)',
         'DeepSeek R1': 'DeepSeek R1',
         'DeepSeek V3': 'DeepSeek V3',
-        'Gemini 2.0 Flash': 'Gemini 2.0 Flash'
+        'Gemini 2.0 Flash': 'Gemini 2.0 Flash',
     }
     
     for model_name in model_subset:

@@ -37,10 +37,10 @@ DEFAULT_REPO_ID = "agent-evals/hal_traces"
 DEFAULT_REVISION = "main"
 
 
-BENCHMARK_AGENT_PREFIX = "scicode_scicode_tool_calling_agent"
+# BENCHMARK_AGENT_PREFIX = "scicode_scicode_tool_calling_agent"
 # BENCHMARK_AGENT_PREFIX = "assistantbench_assistantbench_browser_agent"
 # BENCHMARK_AGENT_PREFIX = "taubench_airline_taubench_fewshot"  
-# BENCHMARK_AGENT_PREFIX = "corebench_hard_coreagent"
+BENCHMARK_AGENT_PREFIX = "corebench_hard"
 
 DEFAULT_TASK_LIMIT: Optional[int] = None  # Keep all tasks by default
 if DEFAULT_TASK_LIMIT is None:

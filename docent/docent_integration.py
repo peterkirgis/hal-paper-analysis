@@ -15,9 +15,8 @@ import warnings
 from datetime import datetime
 from typing import Any, Dict, List, Tuple
 
-from pydantic import Field
+from pydantic import BaseModel, Field
 
-from docent.data_models import BaseAgentRunMetadata
 from docent.data_models.chat import ChatMessage, ToolCall, parse_chat_message
 
 
@@ -473,7 +472,7 @@ def parse_messages_to_chat_messages(
     return messages
 
 
-class BaseBenchmarkMetadata(BaseAgentRunMetadata):
+class BaseBenchmarkMetadata(BaseModel):
     """Base metadata class for benchmark agent runs."""
 
     benchmark_id: str = Field(description="The benchmark name")

@@ -1,0 +1,127 @@
+
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Qualitative Comparison: Model Behavior on CORE-Bench</title>
+    <style>
+        body { font-family: Inter, -apple-system, BlinkMacSystemFont, sans-serif; padding: 20px; }
+        h1 { font-size: 20px; margin-bottom: 20px; }
+    </style>
+</head>
+<body>
+    <h1>Qualitative Comparison: Model Behavior on CORE-Bench Capsules</h1>
+    <style type="text/css">
+#T_5836c th {
+  background-color: #2C2C2C;
+  color: white;
+  font-weight: bold;
+  text-align: center;
+  padding: 12px;
+  font-size: 14px;
+}
+#T_5836c td {
+  text-align: left;
+  padding: 10px;
+  font-size: 11px;
+  vertical-align: top;
+  line-height: 1.4;
+}
+#T_5836c td:first-child {
+  text-align: center;
+  font-weight: bold;
+}
+#T_5836c  {
+  border-collapse: collapse;
+  width: 100%;
+}
+#T_5836c th {
+  border: 1px solid #CCCCCC;
+}
+#T_5836c  td {
+  border: 1px solid #CCCCCC;
+}
+#T_5836c_row0_col0, #T_5836c_row0_col1, #T_5836c_row0_col2, #T_5836c_row1_col0, #T_5836c_row1_col1, #T_5836c_row1_col2, #T_5836c_row2_col0, #T_5836c_row2_col1, #T_5836c_row2_col2, #T_5836c_row3_col0, #T_5836c_row3_col1, #T_5836c_row3_col2, #T_5836c_row4_col0, #T_5836c_row4_col1, #T_5836c_row4_col2, #T_5836c_row5_col0, #T_5836c_row5_col1, #T_5836c_row5_col2, #T_5836c_row6_col0, #T_5836c_row6_col1, #T_5836c_row6_col2, #T_5836c_row7_col0, #T_5836c_row7_col1, #T_5836c_row7_col2, #T_5836c_row8_col0, #T_5836c_row8_col1, #T_5836c_row8_col2, #T_5836c_row9_col0, #T_5836c_row9_col1, #T_5836c_row9_col2 {
+  max-width: 300px;
+  word-wrap: break-word;
+}
+#T_5836c_row0_col3, #T_5836c_row1_col3, #T_5836c_row2_col3, #T_5836c_row3_col3, #T_5836c_row4_col3, #T_5836c_row5_col3, #T_5836c_row6_col3, #T_5836c_row7_col3, #T_5836c_row8_col3, #T_5836c_row9_col3 {
+  background-color: #E8F5E9;
+  max-width: 300px;
+  word-wrap: break-word;
+}
+</style>
+<table id="T_5836c">
+  <thead>
+    <tr>
+      <th id="T_5836c_level0_col0" class="col_heading level0 col0" >Capsule</th>
+      <th id="T_5836c_level0_col1" class="col_heading level0 col1" >Opus 4.1</th>
+      <th id="T_5836c_level0_col2" class="col_heading level0 col2" >Sonnet 4</th>
+      <th id="T_5836c_level0_col3" class="col_heading level0 col3" >Opus 4.5</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td id="T_5836c_row0_col0" class="data row0 col0" >1394704</td>
+      <td id="T_5836c_row0_col1" class="data row0 col1" >Environmental barriers → simulated data + misrepresentation. Env failures blocked Rmd; computed on synthetic incidence; summary overstated completion.</td>
+      <td id="T_5836c_row0_col2" class="data row0 col2" >Environmental barriers → heuristic/simulated fallback. Disk/deps blocked Rmd; replaced pipeline + hard-coded epidemic curve.</td>
+      <td id="T_5836c_row0_col3" class="data row0 col3" >Creative debugging + instruction following. Fixed deps/Pandoc + small Rmd edit; ran intended workflow; extracted ground-truth from HTML.</td>
+    </tr>
+    <tr>
+      <td id="T_5836c_row1_col0" class="data row1 col0" >2345790</td>
+      <td id="T_5836c_row1_col1" class="data row1 col1" >Environmental barriers → heuristic aggregation. Disk blocked Rmd; used trial-level mean (not across participants) and wrong units.</td>
+      <td id="T_5836c_row1_col2" class="data row1 col2" >Environmental barriers → precision-only output. Correct values but emitted unrounded full precision.</td>
+      <td id="T_5836c_row1_col3" class="data row1 col3" >Creative debugging + instruction following. Rendered official Rmds; extracted correct response rates; cross-checked with participant-level logic.</td>
+    </tr>
+    <tr>
+      <td id="T_5836c_row2_col0" class="data row2 col0" >3262218</td>
+      <td id="T_5836c_row2_col1" class="data row2 col1" >Heuristic shortcut + instruction miss. Used caption total (57) vs methods subset (45) after failing to render.</td>
+      <td id="T_5836c_row2_col2" class="data row2 col2" >Heuristic shortcut over precise data. Computed methods=45 but deferred to manuscript narrative total (57).</td>
+      <td id="T_5836c_row2_col3" class="data row2 col3" >Instruction following under constraints. Computed the methods subset directly from processed data; returned 45.</td>
+    </tr>
+    <tr>
+      <td id="T_5836c_row3_col0" class="data row3 col0" >3418007</td>
+      <td id="T_5836c_row3_col1" class="data row3 col1" >Environmental barriers → heuristic pipeline substitution. Couldn't reproduce deps; ran simplified custom model (diff splits/params).</td>
+      <td id="T_5836c_row3_col2" class="data row3 col2" >Heuristic substitution over precise data. Pulled metrics from tuning logs instead of requested figure outputs.</td>
+      <td id="T_5836c_row3_col3" class="data row3 col3" >Creative debugging (benchmark editing) to run. Patched code + deps to restore execution; generated outputs; extracted requested metrics.</td>
+    </tr>
+    <tr>
+      <td id="T_5836c_row4_col0" class="data row4 col0" >3449234</td>
+      <td id="T_5836c_row4_col1" class="data row4 col1" >Environmental barriers → misrepresentation / wrong target. Treated "error" as exception text and wrote that as the answer.</td>
+      <td id="T_5836c_row4_col2" class="data row4 col2" >Heuristic guess vs. observing outputs. Guessed highest-std model without inspecting the figure.</td>
+      <td id="T_5836c_row4_col3" class="data row4 col3" >Instruction following + precise data extraction. Re-ran notebook, parsed numeric errors, inspected the rendered plot to answer.</td>
+    </tr>
+    <tr>
+      <td id="T_5836c_row5_col0" class="data row5 col0" >3639589</td>
+      <td id="T_5836c_row5_col1" class="data row5 col1" >Heuristic shortcut from code reading. Inferred color from wrong plot section because env wasn't runnable.</td>
+      <td id="T_5836c_row5_col2" class="data row5 col2" >Heuristic shortcut + wrong figure. Answered from earlier plot, didn't verify the DM-specific figure.</td>
+      <td id="T_5836c_row5_col3" class="data row5 col3" >Creative debugging + precise verification. Ran script, computed maxima, and verified on the rendered figure.</td>
+    </tr>
+    <tr>
+      <td id="T_5836c_row6_col0" class="data row6 col0" >4252248</td>
+      <td id="T_5836c_row6_col1" class="data row6 col1" >Environmental barriers → simulated/placeholder metric. Couldn't run pipeline; hard-coded AUC.</td>
+      <td id="T_5836c_row6_col2" class="data row6 col2" >Environmental barriers → heuristic estimate. No outputs; wrote "typical" AUC.</td>
+      <td id="T_5836c_row6_col3" class="data row6 col3" >Creative debugging + precise data. Installed deps, fixed runtime bugs, ran end-to-end, wrote computed AUC.</td>
+    </tr>
+    <tr>
+      <td id="T_5836c_row7_col0" class="data row7 col0" >5136217</td>
+      <td id="T_5836c_row7_col1" class="data row7 col1" >Environmental barriers → heuristic guess. Couldn't compute party; hard-coded guess; second answer came from code.</td>
+      <td id="T_5836c_row7_col2" class="data row7 col2" >Environmental barriers → heuristic guess. Couldn't run; guessed party.</td>
+      <td id="T_5836c_row7_col3" class="data row7 col3" >Creative debugging + precise outputs. Installed deps, ran scripts, generated figures, extracted computed answers.</td>
+    </tr>
+    <tr>
+      <td id="T_5836c_row8_col0" class="data row8 col0" >7716865</td>
+      <td id="T_5836c_row8_col1" class="data row8 col1" >Instruction-following nuance (rounding). Returned unrounded value instead of table's rounded value.</td>
+      <td id="T_5836c_row8_col2" class="data row8 col2" >Environmental barriers → heuristic approximation. Couldn't run WebPower; manual ANOVA-only approximation.</td>
+      <td id="T_5836c_row8_col3" class="data row8 col3" >Creative debugging + instruction following. Ran official computations and returned table-consistent rounded value.</td>
+    </tr>
+    <tr>
+      <td id="T_5836c_row9_col0" class="data row9 col0" >8807709</td>
+      <td id="T_5836c_row9_col1" class="data row9 col1" >Environmental barriers → simulated plot substitute. API/deps mismatch; answered from custom visualization.</td>
+      <td id="T_5836c_row9_col2" class="data row9 col2" >Environmental barriers → simulated plot substitute. Couldn't run epidemic.py; answered from surrogate sim.</td>
+      <td id="T_5836c_row9_col3" class="data row9 col3" >Creative debugging + precise reproduction. Pinned compatible version, ran epidemic.py, used produced PNG/CSVs.</td>
+    </tr>
+  </tbody>
+</table>
+
+</body>
+</html>
